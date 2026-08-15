@@ -900,7 +900,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             agentCapabilities: {
               loadSession: true,
               promptCapabilities: { image: true, audio: true, embeddedContext: true },
-              sessionCapabilities: { list: {}, delete: {} },
+              sessionCapabilities: { list: {}, delete: {}, resume: {} },
             },
             agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.10.0' },
             authMethods: [],
@@ -936,6 +936,30 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             handles.set(acpSessionId, handle)
             configureAgent(handle.agent)
             replayHistory(acpSessionId, handle.agent)
+            advertiseCommands(acpSessionId, handle.agent)
+            recordApplied(acpSessionId)
+            const opts = await buildConfigOptionsFor(acpSessionId)
+            return respond({ modes: await sessionModesFor(acpSessionId), configOptions: opts })
+          } catch (e) {
+            return fail(-32002, `session not found: ${acpSessionId}`)
+          }
+        }
+        case 'session/resume': {
+          // ACP v1: restore a previous session WITHOUT replaying its history
+          // (session/load replays; resume just reattaches, per the session
+          // setup spec). A session already live in this process answers
+          // directly.
+          const acpSessionId = String(params.sessionId || '')
+          if (!acpSessionId) return fail(-32602, 'session/resume requires params.sessionId')
+          const existingHandle = handles.get(acpSessionId)
+          if (existingHandle) {
+            const opts = await buildConfigOptionsFor(acpSessionId)
+            return respond({ modes: await sessionModesFor(acpSessionId), configOptions: opts })
+          }
+          try {
+            const handle = await agents.resume({ resumeSessionId: acpSessionId as any, agentOptions: agentOptionsFor(acpSessionId), setup: agentSetup })
+            handles.set(acpSessionId, handle)
+            configureAgent(handle.agent)
             advertiseCommands(acpSessionId, handle.agent)
             recordApplied(acpSessionId)
             const opts = await buildConfigOptionsFor(acpSessionId)
