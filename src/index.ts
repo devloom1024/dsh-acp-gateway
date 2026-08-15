@@ -1031,6 +1031,22 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             if (!options.some((o) => o.value === valueStr)) return fail(-32602, `unknown model: ${valueStr}`)
             const cfg = sessionConfigs.get(acpSessionId) || {}
             sessionConfigs.set(acpSessionId, { ...cfg, providerId: provider, modelId: model })
+          } else if (configId === 'provider') {
+            // Compatibility alias: Zed's default_config_options may pre-fill a
+            // standalone provider. Accept it (validate against the directory)
+            // and reset the model so the client re-picks from the new provider.
+            const providers: string[] = []
+            const llmSvc = llmNow()
+            if (llmSvc) {
+              try {
+                for (const p of llmSvc.listProviders()) if (p && p.id) providers.push(p.id)
+              } catch (e) {
+                /* no directory */
+              }
+            }
+            if (!providers.includes(String(value))) return fail(-32602, `unknown provider: ${String(value)}`)
+            const cfg = sessionConfigs.get(acpSessionId) || {}
+            sessionConfigs.set(acpSessionId, { ...cfg, providerId: String(value), modelId: undefined })
           } else if (configId === 'thought_level') {
             const allowed = ['minimal', 'low', 'medium', 'high', 'max']
             if (!allowed.includes(String(value))) return fail(-32602, `unknown thought level: ${String(value)}`)
