@@ -14,6 +14,8 @@
  * @module dsh-acp-gateway/bridge
  */
 import http from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Writable } from 'node:stream'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -27,7 +29,7 @@ const CONNECT_TIMEOUT_MS = 2000
  * would destroy long-lived requests (a 30s LLM turn) and SSE streams as soon
  * as the socket goes quiet. Only the time until the socket connects counts.
  */
-function armConnectTimeout(req, ms) {
+function armConnectTimeout(req: http.ClientRequest, ms: number): void {
   req.on('socket', (socket) => {
     if (!socket.connecting) return
     const timer = setTimeout(() => req.destroy(new Error('connect timeout')), ms)
@@ -40,7 +42,7 @@ function armConnectTimeout(req, ms) {
  * writes, then the default DSH web port. Duplicates are removed.
  * @returns endpoint base URLs, e.g. `['http://127.0.0.1:56045', 'http://127.0.0.1:3080']`.
  */
-export function resolveEndpoints() {
+export function resolveEndpoints(): string[] {
   const list = []
   if (process.env.DSH_ACP_URL) list.push(process.env.DSH_ACP_URL)
   try {
@@ -58,7 +60,7 @@ export function resolveEndpoints() {
  * First endpoint candidate (backwards-compatible convenience).
  * @returns endpoint base URL, e.g. `http://127.0.0.1:3080`.
  */
-export function resolveEndpoint() {
+export function resolveEndpoint(): string {
   return resolveEndpoints()[0]
 }
 
@@ -66,13 +68,13 @@ export function resolveEndpoint() {
  * POST one JSON-RPC body to one endpoint with a connection timeout.
  * @returns the response text.
  */
-function postTo(endpoint, body) {
+function postTo(endpoint: string, body: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       `${endpoint}/acp/rpc`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' } },
       (res) => {
-        if (res.statusCode < 200 || res.statusCode >= 300) {
+        if (res.statusCode === undefined || res.statusCode < 200 || res.statusCode >= 300) {
           res.resume() // drain and drop the body
           reject(new Error(`HTTP ${res.statusCode} from ${endpoint}`))
           return
@@ -99,12 +101,21 @@ function postTo(endpoint, body) {
  * @param onClose - invoked once when input closes (default: exit the process).
  * @returns an object with a `close()` disposer.
  */
-export function attachBridge(input, output, endpoints, onClose = () => process.exit(0)) {
+export interface BridgeHandle {
+  close(): void
+}
+
+export function attachBridge(
+  input: NodeJS.ReadableStream,
+  output: Writable,
+  endpoints: string | string[],
+  onClose: () => void = () => process.exit(0),
+): BridgeHandle {
   const candidates = (Array.isArray(endpoints) ? endpoints : [endpoints]).filter(Boolean)
   let active = candidates[0] || 'http://127.0.0.1:3080'
   let closed = false
 
-  const write = (text) => {
+  const write = (text: string): void => {
     if (closed) return
     try {
       output.write(text + '\n')
@@ -112,7 +123,7 @@ export function attachBridge(input, output, endpoints, onClose = () => process.e
       /* stream closed */
     }
   }
-  const note = (text) => {
+  const note = (text: string): void => {
     try {
       process.stderr.write(`bridge: ${text}\n`)
     } catch (e) {
@@ -120,8 +131,8 @@ export function attachBridge(input, output, endpoints, onClose = () => process.e
     }
   }
   /** Run `fn` against the active endpoint, failing over through the others. */
-  const withEndpoint = async (fn) => {
-    const tried = []
+  const withEndpoint = async <T>(fn: (candidate: string) => Promise<T>): Promise<T> => {
+    const tried: string[] = []
     for (const candidate of [active, ...candidates.filter((c) => c !== active)]) {
       if (tried.includes(candidate)) continue
       tried.push(candidate)
@@ -139,11 +150,11 @@ export function attachBridge(input, output, endpoints, onClose = () => process.e
     throw new Error(`no reachable endpoint in [${candidates.join(', ')}]`)
   }
 
-  const post = (body) => withEndpoint((candidate) => postTo(candidate, body))
+  const post = (body: string): Promise<string> => withEndpoint((candidate) => postTo(candidate, body))
 
   // Subscribe to Agent -> Client notifications (SSE) and forward each as one line.
   // Reconnect after a drop; failed attempts fail over like requests do.
-  const connectEvents = (candidate) =>
+  const connectEvents = (candidate: string): Promise<IncomingMessage> =>
     new Promise((resolve, reject) => {
       const req = http.get(`${candidate}/acp/events`, (res) => resolve(res))
       armConnectTimeout(req, CONNECT_TIMEOUT_MS)
@@ -155,7 +166,7 @@ export function attachBridge(input, output, endpoints, onClose = () => process.e
       .then((res) => {
         let buf = ''
         res.setEncoding('utf8')
-        res.on('data', (c) => {
+        res.on('data', (c: string) => {
           buf += c
           let idx
           while ((idx = buf.indexOf('\n\n')) !== -1) {
@@ -180,8 +191,8 @@ export function attachBridge(input, output, endpoints, onClose = () => process.e
     try {
       const response = await post(trimmed)
       if (response) write(response)
-    } catch (e) {
-      note(`request failed: ${String((e && e.message) || e)}`)
+    } catch (e: unknown) {
+      note(`request failed: ${String((e instanceof Error && e.message) || e)}`)
     }
   })
   rl.on('close', () => close())

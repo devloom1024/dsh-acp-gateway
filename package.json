@@ -3,32 +3,32 @@
   "version": "3.8.0",
   "description": "Distributable DSH (DeepSeek Harness) plugin exposing a full ACP v1 agent over stdio: streaming, tool calls, sessions, image/audio, slash commands, session modes, config options (model/thought level). Ships a one-command isolated ACP server.",
   "type": "module",
-  "main": "src/index.js",
+  "main": "dist/src/index.js",
   "exports": {
-    ".": "./src/index.js",
-    "./codec": "./src/codec.js",
+    ".": "./dist/src/index.js",
+    "./codec": "./dist/src/codec.js",
     "./package.json": "./package.json"
   },
   "bin": {
-    "dsh-acp-agent": "bin/dsh-acp-agent.js",
-    "dsh-acp-server": "bin/dsh-acp-server.js",
-    "dsh-acp-client": "bin/dsh-acp-client.js"
+    "dsh-acp-agent": "dist/src/bin/dsh-acp-agent.js",
+    "dsh-acp-server": "dist/src/bin/dsh-acp-server.js",
+    "dsh-acp-client": "dist/src/bin/dsh-acp-client.js"
   },
   "files": [
-    "src",
-    "bin",
+    "dist",
     "examples",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test tests/",
-    "check": "node --check src/index.js && node --check src/codec.js && node --check bin/dsh-acp-agent.js && node --check bin/dsh-acp-server.js"
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\""
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-app-boot": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.6"
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-app-boot": {
@@ -49,5 +49,10 @@
   "license": "MIT",
   "engines": {
     "node": ">=20"
-  }
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  },
+  "types": "dist/src/index.d.ts"
 }

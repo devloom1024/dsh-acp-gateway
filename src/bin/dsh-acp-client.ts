@@ -25,19 +25,19 @@
 import { createInterface } from 'node:readline'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
-import { resolveEndpoints } from '../src/bridge.js'
+import { resolveEndpoints } from '../bridge.js'
 
 const args = process.argv.slice(2)
-let endpoint = null
+let endpoint: string | null = null
 const epIdx = args.indexOf('--endpoint')
 if (epIdx >= 0) endpoint = args[epIdx + 1]
 args.splice(epIdx >= 0 ? epIdx : args.length, 2)
 
 /** Minimal JSON-RPC transport over HTTP loopback. */
-function makeRpc(base) {
+function makeRpc(base: string): any {
   const pending = new Map()
   let nextId = 1
-  const post = (body) =>
+  const post = (body: string): Promise<any> =>
     new Promise((resolve, reject) => {
       const req = http.request(
         `${base}/acp/rpc`,
@@ -60,19 +60,19 @@ function makeRpc(base) {
       req.end(body)
     })
   const subscribe = () => {
-    const req = http.get(`${base}/acp/events`, (res) => {
+    const req = http.get(`${base}/acp/events`, (res: any) => {
       let buf = ''
       res.setEncoding('utf8')
-      res.on('data', (c) => {
-        buf += c
+      res.on('data', (c: string) => {
+        buf += (c as string)
         let idx
         while ((idx = buf.indexOf('\n\n')) !== -1) {
           const frame = buf.slice(0, idx)
           buf = buf.slice(idx + 2)
           for (const line of frame.split('\n')) {
-            if (line.startsWith('data: ')) {
+            if ((line as string).startsWith('data: ')) {
               try {
-                const notif = JSON.parse(line.slice(6))
+                const notif: any = JSON.parse((line as string).slice(6))
                 const u = notif.params && notif.params.update
                 if (u) renderUpdate(u)
               } catch (e) {
@@ -88,7 +88,7 @@ function makeRpc(base) {
     req.on('error', () => setTimeout(subscribe, 1000))
   }
   return {
-    call: (method, params) => {
+    call: (method: string, params: any): Promise<any> => {
       const id = nextId++
       return post(JSON.stringify({ jsonrpc: '2.0', id, method, params })).then((r) => {
         if (r.error) throw new Error(`[${r.error.code}] ${r.error.message}`)
@@ -100,7 +100,7 @@ function makeRpc(base) {
 }
 
 let lastChunkLine = ''
-function renderUpdate(u) {
+function renderUpdate(u: any): void {
   switch (u.sessionUpdate) {
     case 'agent_message_chunk': {
       const text = (u.content && u.content.text) || ''
@@ -127,17 +127,17 @@ function renderUpdate(u) {
       process.stdout.write(`  🌀 mode: ${u.modeId}\n`)
       break
     case 'available_commands_update':
-      process.stdout.write(`  ⌘ commands: ${(u.availableCommands || []).map((c) => c.name).join(', ')}\n`)
+      process.stdout.write(`  ⌘ commands: ${(u.availableCommands || []).map((c: any) => c.name).join(', ')}\n`)
       break
     case 'config_option_update':
-      process.stdout.write(`  ⚙ config: ${(u.configOptions || []).map((o) => `${o.id}=${o.currentValue}`).join(', ')}\n`)
+      process.stdout.write(`  ⚙ config: ${(u.configOptions || []).map((o: any) => `${o.id}=${o.currentValue}`).join(', ')}\n`)
       break
     default:
       break
   }
 }
 
-function renderResult(label, r) {
+function renderResult(label: string, r: any): void {
   const text = JSON.stringify(r)
   process.stdout.write(`${label}: ${text.length > 400 ? text.slice(0, 400) + '…' : text}\n`)
 }
@@ -171,7 +171,7 @@ async function main() {
           continue
         }
         if (obj.id !== undefined) {
-          const pending = bridge.__pending
+          const pending = (bridge as any).__pending
           if (pending && pending.has(obj.id)) {
             pending.get(obj.id)(obj)
             pending.delete(obj.id)
@@ -182,13 +182,13 @@ async function main() {
         }
       }
     })
-    const pending = new Map()
-    bridge.__pending = pending
+    const pending = new Map<number, (r: any) => void>()
+    ;(bridge as any).__pending = pending
     rpc = {
-      call: (method, params) =>
+      call: (method: string, params: any): Promise<any> =>
         new Promise((resolve, reject) => {
           const id = Math.floor(Math.random() * 1e9)
-          pending.set(id, (r) => {
+          pending.set(id, (r: any) => {
             if (r.error) reject(new Error(`[${r.error.code}] ${r.error.message}`))
             else resolve(r.result)
           })
@@ -203,7 +203,7 @@ async function main() {
     process.stdout.write(`dsh-acp test client — endpoint ${endpoint}\n  type 'help' for commands\n`)
   }
 
-  const runLine = async (line) => {
+  const runLine = async (line: string): Promise<void> => {
     const parts = line.trim().split(/\s+/)
     const cmd = parts[0]
     const rest = line.trim().slice(cmd.length).trim()
@@ -220,7 +220,7 @@ async function main() {
         }
         case 'prompt': {
           const text = rest
-          if (!text) return process.stdout.write('usage: prompt <text>\n')
+          if (!text) { process.stdout.write('usage: prompt <text>\n'); break }
           const r = await rpc.call('session/prompt', { sessionId: currentSession(), prompt: [{ type: 'text', text }] })
           process.stdout.write(`\n✅ ${JSON.stringify(r)}\n`)
           break
@@ -253,18 +253,18 @@ async function main() {
         default:
           if (line.trim()) process.stdout.write(`unknown command: ${cmd} (try 'help')\n`)
       }
-    } catch (e) {
-      process.stdout.write(`✗ ${e.message}\n`)
+    } catch (e: unknown) {
+      process.stdout.write(`✗ ${e instanceof Error ? e.message : String(e)}\n`)
     }
   }
 
-  let current = null
-  function currentSession() {
-    return current
+  let current: string | null = null
+  function currentSession(): string {
+    return current ?? ''
   }
   // remember the last created/loaded session
   const origCall = rpc.call
-  rpc.call = async (method, params) => {
+  rpc.call = async (method: string, params: any): Promise<any> => {
     const r = await origCall(method, params)
     if (method === 'session/new' || method === 'session/load') {
       if (r && r.sessionId) current = r.sessionId
@@ -280,7 +280,7 @@ async function main() {
   process.exit(0)
 }
 
-function inferValue(v) {
+function inferValue(v: string): string | boolean {
   if (v === 'true') return true
   if (v === 'false') return false
   return v

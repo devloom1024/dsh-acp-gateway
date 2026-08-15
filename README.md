@@ -143,9 +143,21 @@ Commands: `init`, `new [cwd]`, `prompt <text>`, `mode <code|plan>`,
 
 ## Development
 
+The package is TypeScript compiled to ESM in `dist/` (NodeNext). Logic lives
+in `src/*.ts`; `bin/` artifacts are emitted to `dist/src/bin/`.
+
 ```bash
-npm run check   # syntax-check all sources
-npm test        # run unit tests
+npm run check   # tsc --noEmit (type-check)
+npm run build   # tsc (emit dist/)
+npm test        # build + run unit tests against the build
+```
+
+The runtime depends on the dsh installation's packages (resolved through the
+`@deepseek-ai/*` symlink farm in `node_modules/`). After any `npm install`,
+restore the links with:
+
+```bash
+./scripts/link-deps.sh
 ```
 
 ## Protocol coverage

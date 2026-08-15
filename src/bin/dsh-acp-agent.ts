@@ -13,6 +13,6 @@
  *   2. `~/.dsh/acp/endpoint` file (written by the plugin when it can)
  *   3. `http://127.0.0.1:3080` (default DSH web port)
  */
-import { attachBridge, resolveEndpoints } from '../src/bridge.js'
+import { attachBridge, resolveEndpoints } from '../bridge.js'
 
 attachBridge(process.stdin, process.stdout, resolveEndpoints())

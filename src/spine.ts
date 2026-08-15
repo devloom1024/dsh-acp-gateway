@@ -10,6 +10,7 @@
  *
  * @module dsh-acp-gateway/spine
  */
+import type { Context } from '@deepseek-ai/cordis'
 import { TimerService } from '@deepseek-ai/cordis-plugin-timer'
 import { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { SessionStore } from '@deepseek-ai/dsh-session'
@@ -35,13 +36,24 @@ const DEFAULT_SESSION_TITLE_CONFIG = {
  * @param ctx - host context (from boot()).
  * @param config - optional overrides (`{ dshHome, persona, toolOrder, maxParallelToolCalls }`).
  */
-export function applySpine(ctx, config = {}) {
+export interface SpineConfig {
+  dshHome?: string
+  persona?: string
+  toolOrder?: string[]
+  maxParallelToolCalls?: number
+  sessionTitle?: Partial<{ fallbackMaxWords: number; fallbackMaxBytes: number; maxTitleBytes: number }>
+  tools?: Record<string, unknown>
+  jobs?: Record<string, unknown>
+  toolBash?: Record<string, unknown> | false
+}
+
+export function applySpine(ctx: Context, config: SpineConfig = {}): void {
   const dshHome = config.dshHome || process.env.DSH_HOME || undefined
 
   ctx.plugin(TimerService)
   ctx.plugin(LlmRuntime)
   ctx.plugin(SessionStore)
-  ctx.plugin(SessionTitleService, config.sessionTitle || DEFAULT_SESSION_TITLE_CONFIG)
+  ctx.plugin(SessionTitleService, { ...DEFAULT_SESSION_TITLE_CONFIG, ...(config.sessionTitle ?? {}) })
   ctx.plugin(SystemPrompt, {
     includeHarnessIdentity: true,
     includeRuntimeContext: true,

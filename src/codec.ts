@@ -3,13 +3,14 @@
  *
  * @module dsh-acp-gateway/codec
  */
+import type { StopReason, ToolKind, ToolCallLocation, DiffContent, ConfigOption, ConfigOptionValue } from './types.js'
 
 /**
  * Map a harness turn ending to ACP's terminal stop-reason vocabulary.
  * @param reason - harness turn outcome (`{ kind }`).
  * @returns the closest legal ACP stop reason.
  */
-export function turnEndToStopReason(reason) {
+export function turnEndToStopReason(reason: { kind?: string } | undefined): StopReason {
   switch (reason && reason.kind) {
     case 'completed':
       return 'end_turn'
@@ -38,7 +39,7 @@ export function turnEndToStopReason(reason) {
  * @param prompt - supported ACP prompt blocks.
  * @returns text in wire order.
  */
-export function acpPromptToText(prompt) {
+export function acpPromptToText(prompt: any[]): string {
   return (Array.isArray(prompt) ? prompt : [])
     .map((block) => {
       if (!block || typeof block !== 'object') return ''
@@ -63,7 +64,7 @@ export function acpPromptToText(prompt) {
  * @param prompt - ACP prompt blocks to inspect.
  * @returns `true` when any block is unsupported.
  */
-export function promptHasUnsupportedContent(prompt) {
+export function promptHasUnsupportedContent(prompt: any[]): boolean {
   return (Array.isArray(prompt) ? prompt : []).some(
     (block) =>
       block &&
@@ -81,7 +82,7 @@ export function promptHasUnsupportedContent(prompt) {
  * @param name - DSH tool name (bash, read, edit, web_fetch, ...).
  * @returns the ACP tool kind.
  */
-export function toolKind(name) {
+export function toolKind(name: string | undefined): ToolKind {
   const n = String(name || '').toLowerCase()
   if (n.includes('todo') || n.includes('goal') || n.includes('subagent') || n.includes('workflow') || n.includes('skill')) return 'other'
   if (n.includes('bash') || n.includes('shell') || n.includes('pwsh') || n.includes('code') || n.includes('run') || n === 'execute') return 'execute'
@@ -100,7 +101,7 @@ export function toolKind(name) {
  * @param args - tool call arguments (object or JSON string).
  * @returns an ACP ToolCallLocation, or undefined when no file path is present.
  */
-export function locationFromArgs(args) {
+export function locationFromArgs(args: any): ToolCallLocation | undefined {
   let a = args
   if (typeof a === 'string') {
     try {
@@ -128,7 +129,7 @@ export function locationFromArgs(args) {
 }
 
 /** Parse tool arguments (object or JSON string). */
-function parseArgs(args) {
+function parseArgs(args: any): any {
   if (typeof args === 'string') {
     try {
       return JSON.parse(args)
@@ -143,7 +144,7 @@ function parseArgs(args) {
  * Human-readable tool title per the spec ("describing what the tool is doing").
  * Falls back to the raw tool name.
  */
-export function toolTitle(name, args) {
+export function toolTitle(name: string | undefined, args: any): string {
   const n = String(name || '').toLowerCase()
   const a = parseArgs(args)
   const path = a && (typeof a.path === 'string' ? a.path : typeof a.file_path === 'string' ? a.file_path : undefined)
@@ -180,7 +181,7 @@ export function toolTitle(name, args) {
  * (`str_replace` → old_str/new_str, `create` → file_text).
  * @returns a `{ type: 'diff', path, oldText, newText }` block, or undefined.
  */
-export function diffFromArgs(name, args) {
+export function diffFromArgs(name: string | undefined, args: any): DiffContent | undefined {
   const n = String(name || '').toLowerCase()
   const a = parseArgs(args)
   if (!a) return undefined
@@ -219,8 +220,15 @@ export function diffFromArgs(name, args) {
  * `aborted`, `addEventListener`, and `removeEventListener`.
  * @returns a mock signal that never aborts.
  */
-export function makeNeverSignal() {
-  const listeners = new Set()
+export interface NeverSignal {
+  readonly aborted: boolean
+  addEventListener(type: string, listener: (event?: any) => void): void
+  removeEventListener(type: string, listener: (event?: any) => void): void
+  _abort(): void
+}
+
+export function makeNeverSignal(): NeverSignal {
+  const listeners = new Set<(event?: any) => void>()
   return {
     get aborted() {
       return false
@@ -248,7 +256,12 @@ export function makeNeverSignal() {
  * @param planActive - whether DSH plan mode is currently active.
  * @returns the ACP SessionModeState.
  */
-export function sessionModeState(planActive) {
+export interface SessionModeState {
+  currentModeId: string
+  availableModes: { id: string; name: string; description: string }[]
+}
+
+export function sessionModeState(planActive: boolean): SessionModeState {
   return {
     currentModeId: planActive ? 'plan' : 'code',
     availableModes: [
@@ -270,7 +283,7 @@ export function sessionModeState(planActive) {
 /**
  * See index.js for usage notes.
  */
-export function buildBridgeScript(endpoint) {
+export function buildBridgeScript(endpoint: string): string {
   return [
     '#!/usr/bin/env node',
     '// DSH ACP stdio bridge - launch this file as an ACP agent from your editor (Zed, VS Code ACP, ...).',
@@ -339,7 +352,17 @@ export function buildBridgeScript(endpoint) {
  *   effort, model options, effort options).
  * @returns the configOptions array (never empty: `mode` is always present).
  */
-export function buildConfigOptions(input) {
+export interface ConfigOptionsInput {
+  currentModeId: string
+  availableModes: { id: string; name: string; description: string }[]
+  modelId?: string | null
+  reasoningEffort?: string | null
+  modelOptions?: ConfigOptionValue[]
+  effortOptions?: ConfigOptionValue[]
+  sandboxMode?: string | null
+}
+
+export function buildConfigOptions(input: ConfigOptionsInput): ConfigOption[] {
   const {
     currentModeId,
     availableModes,
@@ -349,7 +372,7 @@ export function buildConfigOptions(input) {
     effortOptions = [],
     sandboxMode,
   } = input
-  const options = [
+  const options: ConfigOption[] = [
     {
       id: 'mode',
       name: 'Session Mode',

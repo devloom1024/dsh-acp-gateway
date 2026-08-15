@@ -15,9 +15,31 @@
  *
  * @module dsh-acp-gateway
  */
+import type { Context, Service } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { randomUUID } from 'node:crypto'
+import type { NeverSignal, SessionModeState, ConfigOptionsInput } from './codec.js'
+import type {
+  AgentsService,
+  LlmService,
+  DefaultModelService,
+  ToolsService,
+  CommandsService,
+  PlanModeService,
+  ApprovalService,
+  AgentPresetsService,
+  SessionQueryService,
+  ShellService,
+  FsService,
+  SandboxPolicyService,
+  AttachmentsService,
+  LoaderService,
+  WebServerService,
+  AgentHandle,
+  DshAgent,
+} from './dsh.js'
 import { turnEndToStopReason, toolKind, toolTitle, locationFromArgs, diffFromArgs, makeNeverSignal, sessionModeState, buildConfigOptions, buildBridgeScript } from './codec.js'
+import type { StopReason, SessionUpdate, ConfigOption } from './types.js'
+import { randomUUID } from 'node:crypto'
 
 export const name = 'acp-gateway'
 /** Hard dependencies: the agent factory and timers. Everything else is optional. */
@@ -26,6 +48,18 @@ export const inject = ['agents', 'timer']
 /** Session mode ids this agent advertises. */
 const MODE_IDS = ['code', 'plan']
 
+/**
+ * Optional gateway configuration.
+ * @param stdioScriptPath - where the generated bridge script is written.
+ * @param provider - model provider route (used when no DSH default model exists).
+ * @param model - model id (used when no DSH default model exists).
+ */
+export interface GatewayConfig {
+  stdioScriptPath?: string
+  provider?: string
+  model?: string
+}
+
 
 /**
  * Mount the ACP agent gateway.
@@ -33,7 +67,7 @@ const MODE_IDS = ['code', 'plan']
  * @param config - optional `{ stdioScriptPath }` override for where the
  *   generated bridge script is written.
  */
-export async function apply(ctx, config = {}) {
+export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<void> {
   try {
     ctx.logger.info('acp-gateway: apply entered')
   } catch (e) {
@@ -41,25 +75,25 @@ export async function apply(ctx, config = {}) {
   }
   const webServer = ctx.get('webServer')
   const agents = ctx.agents
-  const sessionQueryNow = () => ctx.get('sessionQuery')
-  const fsNow2 = () => ctx.get('fs')
-  const shellNow2 = () => ctx.get('shell')
-  const sandboxPolicyNow = () => ctx.get('sandboxPolicy')
-  const toolsNow = () => ctx.get('tools')
-  const attachmentsNow = () => ctx.get('attachments')
-  const commandsNow = () => ctx.get('commands')
+  const sessionQueryNow = (): SessionQueryService | undefined => ctx.get('sessionQuery')
+  const fsNow2 = (): FsService | undefined => ctx.get('fs')
+  const shellNow2 = (): ShellService | undefined => ctx.get('shell')
+  const sandboxPolicyNow = (): SandboxPolicyService | undefined => ctx.get('sandboxPolicy')
+  const toolsNow = (): ToolsService | undefined => ctx.get('tools')
+  const attachmentsNow = (): AttachmentsService | undefined => ctx.get('attachments')
+  const commandsNow = (): CommandsService | undefined => ctx.get('commands')
   // Services that can become available after apply (the official web profile
   // activates rows in service order) are read lazily at call time.
-  const planModeNow = () => ctx.get('planMode')
-  const defaultModelNow = () => ctx.get('agentDefaultModel')
-  const llmNow = () => ctx.get('llm')
-  const approvalNow = () => ctx.get('approval')
-  const agentPresetsNow = () => ctx.get('agentPresets')
+  const planModeNow = (): PlanModeService | undefined => ctx.get('planMode')
+  const defaultModelNow = (): DefaultModelService | undefined => ctx.get('agentDefaultModel')
+  const llmNow = (): LlmService | undefined => ctx.get('llm')
+  const approvalNow = (): ApprovalService | undefined => ctx.get('approval')
+  const agentPresetsNow = (): AgentPresetsService | undefined => ctx.get('agentPresets')
 
 
   // ---- model selection -------------------------------------------------
   /** The ambient model selection (DSH default model, or gateway config). */
-  const modelSelection = () => {
+  const modelSelection = (): { provider?: string; model?: string; reasoningEffort?: string } | null => {
     const defaultModel = defaultModelNow()
     if (defaultModel) {
       try {
@@ -73,7 +107,7 @@ export async function apply(ctx, config = {}) {
     return null
   }
   /** Model catalog for one provider route (empty when unavailable). */
-  const modelOptionsFor = async (provider) => {
+  const modelOptionsFor = async (provider: string | undefined): Promise<{ value: string; name: string }[]> => {
     const llm = llmNow()
     if (!llm || !provider) return []
     try {
@@ -85,7 +119,7 @@ export async function apply(ctx, config = {}) {
   }
   /** Model context window (tokens) with per-model caching. */
   const contextCache = new Map()
-  const contextWindowFor = async (provider, model) => {
+  const contextWindowFor = async (provider: string | undefined, model: string | undefined): Promise<number | null> => {
     const key = `${provider}/${model}`
     if (contextCache.has(key)) return contextCache.get(key)
     let size = null
@@ -102,7 +136,7 @@ export async function apply(ctx, config = {}) {
     return size
   }
   /** Agent options for one session: session config overrides the ambient selection. */
-  const agentOptionsFor = (acpSessionId) => {
+  const agentOptionsFor = (acpSessionId?: string): { provider?: string; model?: string; reasoningEffort?: string } => {
     const sel = modelSelection()
     if (!sel) return {}
     const cfg = acpSessionId ? sessionConfigs.get(acpSessionId) : undefined
@@ -116,7 +150,7 @@ export async function apply(ctx, config = {}) {
     }
   }
   /** The session's current sandbox mode (permission level) from its log. */
-  const sandboxModeFor = (agent) => {
+  const sandboxModeFor = (agent: DshAgent): string | null => {
     try {
       const events = agent.session.log || agent.session.events || []
       for (let i = events.length - 1; i >= 0; i -= 1) {
@@ -129,7 +163,7 @@ export async function apply(ctx, config = {}) {
   }
 
   // ---- agent assembly ---------------------------------------------------
-  const agentSetup = async (agentCtx) => {
+  const agentSetup = async (agentCtx: any): Promise<void> => {
     try {
       // Full tool access + system prompt, same as the Web GUI. In the
       // standalone (isolated) deployment the composition supplies tools
@@ -144,7 +178,7 @@ export async function apply(ctx, config = {}) {
             await agentPresets.mount(agentCtx, 'standard')
           }
         } catch (e) {
-          ctx.logger.warn(`acp-gateway: preset mount failed: ${String((e && e.message) || e)}`)
+          ctx.logger.warn(`acp-gateway: preset mount failed: ${String((e instanceof Error && e.message) || e)}`)
         }
       }
     } catch (e) {
@@ -159,7 +193,7 @@ export async function apply(ctx, config = {}) {
       /* ignore */
     }
   }
-  const configureAgent = (agent) => {
+  const configureAgent = (agent: DshAgent): void => {
     try {
       // Auto-approve tool calls: the ACP client is the permission surface.
       const approval = approvalNow()
@@ -173,7 +207,7 @@ export async function apply(ctx, config = {}) {
    * the agent plane (isolate realm), so read it from the agent's own context
    * first, falling back to the host plane (dynamic harness compositions).
    */
-  const planModeFor = (agent) => {
+  const planModeFor = (agent: DshAgent): PlanModeService | undefined => {
     try {
       if (agent && agent.ctx) {
         const pm = agent.ctx.get('planMode')
@@ -184,7 +218,7 @@ export async function apply(ctx, config = {}) {
     }
     return planModeNow()
   }
-  const modeStateFor = (agent) => {
+  const modeStateFor = (agent: DshAgent): SessionModeState => {
     let planActive = false
     const planMode = planModeFor(agent)
     if (planMode) {
@@ -201,19 +235,19 @@ export async function apply(ctx, config = {}) {
   }
 
   // ---- state ------------------------------------------------------------
-  const handles = new Map()
-  const sessionConfigs = new Map() // acpSessionId -> { modelId?, reasoningEffort? } (client-desired)
-  const appliedOptions = new Map() // acpSessionId -> { model?, reasoningEffort? } (agent actually built with)
+  const handles = new Map<string, AgentHandle>()
+  const sessionConfigs = new Map<string, { providerId?: string; modelId?: string; reasoningEffort?: string }>()
+  const appliedOptions = new Map<string, { provider?: string | null; model?: string | null; reasoningEffort?: string | null }>()
   const subscribers = new Set()
-  const inflightPrompts = new Map()
-  const announcedToolCalls = new Set()
-  const toolCallArgs = new Map() // callId -> arguments (for diff reconstruction)
+  const inflightPrompts = new Map<string, { turn: number; clearTimer: () => void; resolve: (reason: StopReason) => void; reject: (err: Error) => void }>()
+  const announcedToolCalls = new Set<string>()
+  const toolCallArgs = new Map<string, { name: string; arguments: any }>() // callId -> call facts (for diff reconstruction)
   const newSessionId = () => `sess_acp_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`
 
   // ---- broadcast ---------------------------------------------------------
-  const broadcast = (notification) => {
+  const broadcast = (notification: unknown): void => {
     const json = JSON.stringify(notification)
-    for (const sub of subscribers) {
+    for (const sub of subscribers as Set<{ send: (json: string) => void }>) {
       try {
         sub.send(json)
       } catch (e) {
@@ -221,17 +255,17 @@ export async function apply(ctx, config = {}) {
       }
     }
   }
-  const subscribe = (send) => {
+  const subscribe = (send: (json: string) => void): (() => void) => {
     const sub = { send }
     subscribers.add(sub)
     return () => subscribers.delete(sub)
   }
-  const notifyUpdate = (acpSessionId, update) => {
+  const notifyUpdate = (acpSessionId: string, update: SessionUpdate): void => {
     broadcast({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: acpSessionId, update } })
   }
 
   // ---- event -> ACP notification mapping ----------------------------------
-  const mapSessionEvent = (acpSessionId, event) => {
+  const mapSessionEvent = (acpSessionId: string, event: any): void => {
     switch (event.type) {
       case 'assistant/chunk': {
         const chunk = event.data && event.data.chunk
@@ -309,17 +343,17 @@ export async function apply(ctx, config = {}) {
         break
       }
       case 'tool/result': {
-        const blocks = event.data.message ? event.data.message.content : []
-        const resultBlock = blocks.find((b) => b && b.type === 'tool-result')
-        const innerBlocks = resultBlock && Array.isArray(resultBlock.content) ? resultBlock.content : []
-        const textBlocks = innerBlocks.filter((b) => b && b.type === 'text')
+        const blocks: any[] = event.data.message ? event.data.message.content : []
+        const resultBlock: any = blocks.find((b: any) => b && b.type === 'tool-result')
+        const innerBlocks: any[] = resultBlock && Array.isArray(resultBlock.content) ? resultBlock.content : []
+        const textBlocks: any[] = innerBlocks.filter((b: any) => b && b.type === 'text')
         const callId = String(
           (resultBlock && resultBlock.toolCallId) ||
             (event.data.message && (event.data.message.toolCallId || event.data.message.callId)) ||
             event.data.callId ||
             '',
         )
-        const content = []
+        const content: any[] = []
         const callRec = toolCallArgs.get(callId)
         const diff = callRec ? diffFromArgs(callRec.name, callRec.arguments) : undefined
         if (diff) content.push(diff)
@@ -363,7 +397,7 @@ export async function apply(ctx, config = {}) {
     if (inflight && event.type === 'turn/end' && event.data.turn === inflight.turn) {
       inflightPrompts.delete(sid)
       if (inflight.clearTimer) inflight.clearTimer()
-      const reason = event.data.reason
+      const reason: { kind?: string; error?: { message?: string } } | undefined = event.data.reason
       // Delay the RPC response slightly so every notification emitted for this
       // turn (streamed chunks, tool updates, usage) reaches the client before
       // the terminal stopReason — a response arriving early makes clients
@@ -380,7 +414,7 @@ export async function apply(ctx, config = {}) {
   })
 
   // ---- slash commands -----------------------------------------------------
-  const advertiseCommands = (acpSessionId, agent) => {
+  const advertiseCommands = (acpSessionId: string, agent: DshAgent): void => {
     const commands = commandsNow()
     if (!commands) return
     try {
@@ -395,7 +429,7 @@ export async function apply(ctx, config = {}) {
       /* no commands service */
     }
   }
-  const tryRunCommand = async (agent, text) => {
+  const tryRunCommand = async (agent: DshAgent, text: string): Promise<{ stopReason: StopReason; output?: string } | null> => {
     const commands = commandsNow()
     if (!commands || typeof text !== 'string' || !text.startsWith('/')) return null
     const line = text.trim()
@@ -411,7 +445,7 @@ export async function apply(ctx, config = {}) {
   }
 
   // ---- prompt content conversion (text/image/audio/resource) ---------------
-  const buildPromptContent = async (acpBlocks) => {
+  const buildPromptContent = async (acpBlocks: any[]): Promise<{ type: string; text?: string; data?: Uint8Array; mimeType?: string; uri?: string }[]> => {
     const content = []
     for (const b of Array.isArray(acpBlocks) ? acpBlocks : []) {
       if (!b || typeof b !== 'object') continue
@@ -420,14 +454,15 @@ export async function apply(ctx, config = {}) {
       } else if (b.type === 'resource' && b.resource && typeof b.resource.text === 'string') {
         content.push({ type: 'text', text: b.resource.text })
       } else if (b.type === 'image' && b.data && attachmentsNow()) {
+        const attachments = attachmentsNow()
         try {
           const binary = atob(b.data)
           const bytes = new Uint8Array(binary.length)
           for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-          const ref = await attachments.saveImage({ data: bytes, mediaType: b.mimeType || 'image/png', name: b.uri || undefined })
+          const ref = await attachments!.saveImage({ data: bytes, mediaType: b.mimeType || 'image/png', name: b.uri || undefined })
           content.push({ type: 'image', attachment: ref })
-        } catch (e) {
-          content.push({ type: 'text', text: `[image attachment failed to load: ${String((e && e.message) || e)}]` })
+        } catch (e: unknown) {
+          content.push({ type: 'text', text: `[image attachment failed to load: ${String((e instanceof Error && e.message) || e)}]` })
         }
       } else if (b.type === 'audio' && b.data) {
         // DSH has no native audio block; pass a textual reference.
@@ -438,10 +473,10 @@ export async function apply(ctx, config = {}) {
   }
 
   // ---- prompt execution -----------------------------------------------------
-  const runPrompt = (handle, acpSessionId, text) =>
+  const runPrompt = (handle: AgentHandle, acpSessionId: string, text: string): Promise<{ stopReason: StopReason }> =>
     new Promise((resolve, reject) => {
       const agent = handle.agent
-      const turn = agent.session.log.filter((e) => e.type === 'turn/end').length + 1
+      const turn = (agent.session.log as any[]).filter((e: any) => e.type === 'turn/end').length + 1
       let clearTimer = ctx.timeout(() => {
         inflightPrompts.delete(acpSessionId)
         reject(new Error('ACP prompt timed out'))
@@ -474,7 +509,7 @@ export async function apply(ctx, config = {}) {
    * safe, nudge the host row into activation once per process.
    */
   let hostPlanModeEnsured = false
-  const ensureHostPlanMode = async () => {
+  const ensureHostPlanMode = async (): Promise<void> => {
     if (hostPlanModeEnsured) return
     hostPlanModeEnsured = true
     try {
@@ -495,7 +530,7 @@ export async function apply(ctx, config = {}) {
    * Model catalog across every registered provider, keyed as
    * `<provider>/<model>` (e.g. `opencode-go/deepseek-v4-flash`).
    */
-  const allModelOptions = async () => {
+  const allModelOptions = async (): Promise<{ value: string; name: string }[]> => {
     const llm = llmNow()
     if (!llm) return []
     const options = []
@@ -516,7 +551,7 @@ export async function apply(ctx, config = {}) {
     }
     return options
   }
-  const buildConfigOptionsFor = async (acpSessionId) => {
+  const buildConfigOptionsFor = async (acpSessionId: string): Promise<ConfigOption[]> => {
     const sel = modelSelection()
     const cfg = sessionConfigs.get(acpSessionId)
     const providerId = (cfg && cfg.providerId) || (sel && sel.provider) || null
@@ -537,7 +572,7 @@ export async function apply(ctx, config = {}) {
     })
   }
   /** Whether the live agent was built with the session's current desired config. */
-  const needsRebuild = (acpSessionId) => {
+  const needsRebuild = (acpSessionId: string): boolean => {
     const cfg = sessionConfigs.get(acpSessionId) || {}
     const applied = appliedOptions.get(acpSessionId) || {}
     const sel = modelSelection() || {}
@@ -550,7 +585,7 @@ export async function apply(ctx, config = {}) {
       desiredEffort !== (applied.reasoningEffort || null)
     )
   }
-  const recordApplied = (acpSessionId) => {
+  const recordApplied = (acpSessionId: string): void => {
     const opts = agentOptionsFor(acpSessionId)
     appliedOptions.set(acpSessionId, {
       provider: opts.provider || null,
@@ -563,7 +598,7 @@ export async function apply(ctx, config = {}) {
    * it was created: dispose and resume from the persisted session with the new
    * options. Falls back to the current handle when resume fails.
    */
-  const ensureFreshAgent = async (acpSessionId) => {
+  const ensureFreshAgent = async (acpSessionId: string): Promise<AgentHandle | undefined> => {
     const handle = handles.get(acpSessionId)
     if (!handle || !needsRebuild(acpSessionId)) return handle
     try {
@@ -572,26 +607,26 @@ export async function apply(ctx, config = {}) {
       /* already gone */
     }
     try {
-      const fresh = await agents.resume({ resumeSessionId: acpSessionId, agentOptions: agentOptionsFor(acpSessionId), setup: agentSetup })
+      const fresh = await agents.resume({ resumeSessionId: acpSessionId as any, agentOptions: agentOptionsFor(acpSessionId), setup: agentSetup })
       handles.set(acpSessionId, fresh)
       recordApplied(acpSessionId)
       configureAgent(fresh.agent)
       advertiseCommands(acpSessionId, fresh.agent)
       return fresh
     } catch (e) {
-      ctx.logger.warn(`acp-gateway: config rebuild failed for ${acpSessionId}: ${String((e && e.message) || e)}`)
+      ctx.logger.warn(`acp-gateway: config rebuild failed for ${acpSessionId}: ${String((e instanceof Error && e.message) || e)}`)
       return handle
     }
   }
 
   // ---- session/load history replay -------------------------------------------
-  const replayHistory = (acpSessionId, agent) => {
-    for (const event of agent.session.log) {
+  const replayHistory = (acpSessionId: string, agent: DshAgent): void => {
+    for (const event of agent.session.log as any[]) {
       if (event.type === 'user/message') {
-        const text = event.data.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
+        const text = (event.data.content as any[]).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
         if (text) notifyUpdate(acpSessionId, { sessionUpdate: 'user_message_chunk', messageId: String(event.seq), content: { type: 'text', text } })
       } else if (event.type === 'assistant/message') {
-        for (const block of event.data.message.content) {
+        for (const block of event.data.message.content as any[]) {
           if (block.type === 'text' && block.text) {
             notifyUpdate(acpSessionId, { sessionUpdate: 'agent_message_chunk', messageId: String(event.seq), content: { type: 'text', text: block.text } })
           }
@@ -601,15 +636,15 @@ export async function apply(ctx, config = {}) {
   }
 
   // ---- protocol dispatch --------------------------------------------------------
-  const handleMessage = async (msg) => {
+  const handleMessage = async (msg: any): Promise<any> => {
     if (!msg || typeof msg !== 'object' || typeof msg.method !== 'string') {
       const id = msg && typeof msg.id !== 'undefined' ? msg.id : null
       return { jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid Request' } }
     }
     const { id, method, params = {} } = msg
     const hasId = typeof id !== 'undefined'
-    const respond = (result) => (hasId ? { jsonrpc: '2.0', id, result } : null)
-    const fail = (code, message) => (hasId ? { jsonrpc: '2.0', id, error: { code, message } } : null)
+    const respond = (result: any) => (hasId ? { jsonrpc: '2.0', id, result } : null)
+    const fail = (code: number, message: string) => (hasId ? { jsonrpc: '2.0', id, error: { code, message } } : null)
     try {
       switch (method) {
         case 'initialize': {
@@ -629,7 +664,7 @@ export async function apply(ctx, config = {}) {
           await ensureHostPlanMode()
           const acpSessionId = newSessionId()
           const handle = await agents.create({
-            sessionId: acpSessionId,
+            sessionId: acpSessionId as any,
             meta: { cwd: params.cwd },
             agentOptions: agentOptionsFor(),
             setup: agentSetup,
@@ -644,12 +679,13 @@ export async function apply(ctx, config = {}) {
         case 'session/load': {
           const acpSessionId = String(params.sessionId || '')
           if (!acpSessionId) return fail(-32602, 'session/load requires params.sessionId')
-          if (handles.has(acpSessionId)) {
+          const existingHandle = handles.get(acpSessionId)
+          if (existingHandle) {
             const opts = await buildConfigOptionsFor(acpSessionId)
-            return respond({ modes: modeStateFor(handles.get(acpSessionId).agent), configOptions: opts })
+            return respond({ modes: modeStateFor(existingHandle.agent), configOptions: opts })
           }
           try {
-            const handle = await agents.resume({ resumeSessionId: acpSessionId, agentOptions: agentOptionsFor(acpSessionId), setup: agentSetup })
+            const handle = await agents.resume({ resumeSessionId: acpSessionId as any, agentOptions: agentOptionsFor(acpSessionId), setup: agentSetup })
             handles.set(acpSessionId, handle)
             configureAgent(handle.agent)
             replayHistory(acpSessionId, handle.agent)
@@ -665,7 +701,7 @@ export async function apply(ctx, config = {}) {
           const handle = await ensureFreshAgent(String(params.sessionId))
           if (!handle) return fail(-32002, `session not found: ${String(params.sessionId)}`)
           const rawText = (Array.isArray(params.prompt) ? params.prompt : [])
-            .map((b) => (b && b.type === 'text' ? b.text : ''))
+            .map((b: any) => (b && b.type === 'text' ? b.text : ''))
             .join('\n')
           const cmdResult = await tryRunCommand(handle.agent, rawText)
           if (cmdResult) {
@@ -811,11 +847,12 @@ export async function apply(ctx, config = {}) {
             }
             handles.delete(acpSessionId)
             inflightPrompts.delete(params.sessionId)
-            if (shell) {
+            const shellDel = shellNow2()
+            if (shellDel) {
               try {
                 const dir = String(params.sessionId).replace(/[^a-zA-Z0-9_-]/g, '_')
-                const spec = shell.resolve({ command: `rm -rf "$HOME/.dsh/sessions"/*/"${dir}"` })
-                await shell.run(spec)
+                const spec = shellDel.resolve({ command: `rm -rf "$HOME/.dsh/sessions"/*/"${dir}"` })
+                await shellDel.run(spec)
               } catch (e) {
                 /* ignore */
               }
@@ -826,15 +863,18 @@ export async function apply(ctx, config = {}) {
         default:
           return fail(-32601, `Method not found: ${String(method)}`)
       }
-    } catch (e) {
-      return fail(typeof e === 'object' && e && e.code ? e.code : -32603, String((e && e.message) || e))
+    } catch (e: unknown) {
+      return fail(
+        typeof e === 'object' && e !== null && 'code' in e ? ((e as { code: number }).code as number) : -32603,
+        String((e instanceof Error && e.message) || e),
+      )
     }
   }
 
   // ---- web-facing mounts: loopback channel + bridge script ---------------------
   // The official `dsh web` profile activates its webServer service after this
   // plugin's own inject deps are ready, so mount lazily when it appears.
-  const mountWeb = async (ws) => {
+  const mountWeb = async (ws: WebServerService): Promise<void> => {
     // Services are resolved lazily here: webServer can appear after apply, and
     // fs/shell may too, so re-read them instead of the apply-time snapshot.
     const fsNow = ctx.get('fs')
@@ -882,29 +922,29 @@ export async function apply(ctx, config = {}) {
           await fsNow.writeText(target, buildBridgeScript(endpoint))
         }
       } catch (e) {
-        ctx.logger.warn(`acp-gateway: stdio bridge script write failed: ${String((e && e.message) || e)}`)
+        ctx.logger.warn(`acp-gateway: stdio bridge script write failed: ${String((e instanceof Error && e.message) || e)}`)
       }
     }
 
     // internal loopback channel (for the stdio bridge only)
-    const readBody = (req) =>
+    const readBody = (req: any): Promise<string> =>
       new Promise((resolve) => {
         let data = ''
         req.setEncoding('utf8')
-        req.on('data', (c) => {
+        req.on('data', (c: string) => {
           data += c
         })
         req.on('end', () => resolve(data))
       })
-    const sendJson = (res, obj, status) => {
+    const sendJson = (res: any, obj: any, status?: number): void => {
       res.writeHead(status || 200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(obj))
     }
-    ctx.effect(() =>
-      ws.register({
+    ctx.effect(() => {
+      const dispose = ws.register({
         kind: 'exact',
         path: '/acp/rpc',
-        async handler(req, res) {
+        async handler(req: any, res: any) {
           try {
             if (req.method !== 'POST') {
               sendJson(res, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'POST required' } }, 405)
@@ -926,22 +966,23 @@ export async function apply(ctx, config = {}) {
             }
           } catch (e) {
             try {
-              sendJson(res, { jsonrpc: '2.0', id: null, error: { code: -32603, message: String((e && e.message) || e) } })
+              sendJson(res, { jsonrpc: '2.0', id: null, error: { code: -32603, message: String((e instanceof Error && e.message) || e) } })
             } catch (e2) {
               /* socket gone */
             }
           }
         },
-      }),
-    )
-    ctx.effect(() =>
-      ws.register({
+      }) as unknown as () => void
+      return dispose
+    })
+    ctx.effect(() => {
+      const dispose = ws.register({
         kind: 'exact',
         path: '/acp/events',
-        handler(req, res) {
+        handler(req: any, res: any) {
           res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
           res.write(': connected\n\n')
-          const off = subscribe((json) => {
+          const off = subscribe((json: string) => {
             try {
               res.write(`data: ${json}\n\n`)
             } catch (e) {
@@ -950,10 +991,11 @@ export async function apply(ctx, config = {}) {
           })
           req.on('close', off)
         },
-      }),
-    )
+      }) as unknown as () => void
+      return dispose
+    })
   }
-  ctx.inject(['webServer'], (webCtx) => mountWeb(webCtx.webServer))
+  ctx.inject(['webServer'] as any, (webCtx: any) => mountWeb(webCtx.webServer))
 
   // ---- model-facing test tool (registered globally; hidden from ACP agents) ------
   const tools = toolsNow()
@@ -968,8 +1010,17 @@ export async function apply(ctx, config = {}) {
       output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] },
       async execute(args) {
         const promptText = args && typeof args.prompt === 'string' && args.prompt.trim() ? args.prompt : 'Hello! Please introduce yourself in one sentence.'
-        const record = { steps: [], notifications: [], text: '', stopReason: null }
-        const off = subscribe((json) => {
+        const record: {
+          steps: any[]
+          notifications: any[]
+          text: string
+          stopReason: string | null
+          modes?: any
+          sessionId?: string | null
+          notificationTypes?: string[]
+          agentIds?: number
+        } = { steps: [], notifications: [], text: '', stopReason: null }
+        const off = subscribe((json: string) => {
           try {
             record.notifications.push(JSON.parse(json))
           } catch (e) {
@@ -977,13 +1028,13 @@ export async function apply(ctx, config = {}) {
           }
         })
         try {
-          const push = async (request) => {
+          const push = async (request: any): Promise<any> => {
             const response = await handleMessage(request)
             record.steps.push({ request: request.method, id: request.id, response })
             return response
           }
           await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.8.0' } } })
-          const cwd = sandboxPolicy && sandboxPolicy.workspaceRoot ? sandboxPolicy.workspaceRoot : '.'
+          const cwd = (sandboxPolicyNow() && sandboxPolicyNow()!.workspaceRoot) || '.'
           const newRes = await push({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } })
           const sessionId = newRes && newRes.result ? newRes.result.sessionId : null
           record.modes = newRes && newRes.result ? newRes.result.modes : null
@@ -1003,11 +1054,11 @@ export async function apply(ctx, config = {}) {
         return record
       },
     })
-    ctx.effect(() => tools.register(tool))
+    ctx.effect(() => tools.register(tool) as unknown as () => void)
   }
 
   // ---- release all agents on stop ------------------------------------------------
-  ctx.on('dispose', async () => {
+  ;(ctx.on as any)('dispose', async () => {
     for (const handle of handles.values()) {
       try {
         await handle.dispose()

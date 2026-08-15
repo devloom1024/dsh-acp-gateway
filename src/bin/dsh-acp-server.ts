@@ -21,17 +21,29 @@
  *
  * Stdout is reserved for ACP JSON-RPC; all diagnostics go to stderr.
  */
+import http from 'node:http'
 import { parseArgs } from 'node:util'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { boot, healProfilesModuleFallback, installFailLoud, loadEnv, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
-import { attachBridge } from '../src/bridge.js'
+import { attachBridge } from '../bridge.js'
 
 const NAME = 'dsh-acp-server'
 const here = dirname(fileURLToPath(import.meta.url))
-const EMPTY_CONFIG = join(here, '..', 'examples', 'empty.cordis.yml')
+
+/** Locate the package root that owns `examples/` (source tree or dist build). */
+function findPackageRoot(): string {
+  let dir = here
+  for (let i = 0; i < 5; i += 1) {
+    if (existsSync(join(dir, 'examples', 'empty.cordis.yml'))) return dir
+    dir = dirname(dir)
+  }
+  throw new Error(`${NAME}: cannot locate examples/empty.cordis.yml beside ${here}`)
+}
+const PKG_ROOT = findPackageRoot()
+const EMPTY_CONFIG = join(PKG_ROOT, 'examples', 'empty.cordis.yml')
 
 installFailLoud(NAME)
 loadEnv(NAME)
@@ -52,7 +64,7 @@ const { values } = parseArgs({
 })
 
 /** Resolve one npm package to its directory, mirroring Node's parent-walk. */
-function resolvePackageDir(specifier) {
+function resolvePackageDir(specifier: string): string {
   const resolved = import.meta.resolve(specifier + '/package.json')
   return dirname(fileURLToPath(resolved))
 }
@@ -129,7 +141,7 @@ const patches = [
         : []),
       {
         id: 'acp-gateway',
-        name: '../src/index.js',
+        name: '../dist/src/index.js',
         config: {
           provider,
           model: values.model,
@@ -155,11 +167,36 @@ const bareModuleBaseUrl = pathToFileURL(join(acpHome, 'profiles', 'node_modules'
 
 const ctx = await boot(NAME, EMPTY_CONFIG, patches, undefined, bareModuleBaseUrl)
 
+/** Wait until the gateway's loopback route answers (it mounts after apply). */
+async function waitForGateway(endpoint: string, timeoutMs = 20000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const ok = await new Promise<boolean>((resolve) => {
+        const req = http.request(`${endpoint}/acp/rpc`, { method: 'POST', headers: { 'content-type': 'application/json' } }, (res) => {
+          res.resume()
+          // 404/405 = route not mounted yet; anything else means the gateway answers.
+          resolve(res.statusCode !== undefined && res.statusCode !== 404 && res.statusCode !== 405)
+        })
+        req.setTimeout(2000, () => req.destroy())
+        req.on('error', () => resolve(false))
+        req.end('{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}')
+      })
+      if (ok) return
+    } catch (e) {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+}
+
 // Once the loopback server is up, serve ACP JSON-RPC over our own stdio.
-ctx.inject(['webServer'], (webCtx) => {
+;(ctx.inject as any)(['webServer'], (webCtx: any) => {
   const endpoint = `http://127.0.0.1:${webCtx.webServer.port}`
   process.stderr.write(`dsh-acp-server: loopback ${endpoint} (stdin/stdout ACP)\n`)
-  attachBridge(process.stdin, process.stdout, endpoint, () => {
-    void ctx.fiber.dispose().then(() => process.exit(0))
+  void waitForGateway(endpoint).then(() => {
+    attachBridge(process.stdin, process.stdout, endpoint, () => {
+      void ctx.fiber.dispose().then(() => process.exit(0))
+    })
   })
 })
