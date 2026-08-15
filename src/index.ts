@@ -321,16 +321,24 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
                 requestedSchema: { type: 'object', properties, required },
               })
               const result = response && response.result
-              if (result && result.action === 'accepted' && result.answers && typeof result.answers === 'object') {
+              // Spec wire: { action: 'accept', content: { fieldId: value } }.
+              // Older drafts used { action: 'accepted', answers: { fieldId: value } }.
+              const accepted =
+                result &&
+                (result.action === 'accept' || result.action === 'accepted') &&
+                result.content &&
+                typeof result.content === 'object'
+              const acceptedAnswers = accepted ? result.content : result && result.answers
+              if (accepted && acceptedAnswers && typeof acceptedAnswers === 'object') {
                 return {
                   answers: items.map((q: any) => {
-                    const value = result.answers[q.id]
+                    const value = acceptedAnswers[q.id]
                     const selected = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : []
                     return { id: q.id, selected, ...(typeof value === 'string' ? { custom: value } : {}) }
                   }),
                 }
               }
-              throw new Error('elicitation dismissed by user')
+              throw new Error('elicitation declined or cancelled by user')
             },
           }),
         )
