@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      # Build the offline archive (system-node variant) and attach it to the
+      # GitHub Release. Platform-native prebuilds (node-pty etc.) mean each
+      # platform needs its own archive — build on the target platform.
+      - run: bash scripts/package-offline.sh dist-offline
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-offline/dsh-acp-gateway-*.tar.gz
+          generate_release_notes: true

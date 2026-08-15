@@ -1,27 +1,57 @@
 # dsh-acp-gateway
 
-A distributable [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin that exposes a **complete ACP v1 (Agent Client Protocol) agent over stdio**. Any ACP-compatible client — Zed, VS Code ACP, Claude Code, ... — can launch it and get a real DSH agent with the same tool access as the Web GUI.
+An **independent, third-party DeepSeek Harness agent over the Agent Client
+Protocol (ACP v1)** — a complete ACP agent over stdio that any ACP-compatible
+client (Zed, VS Code ACP, Claude Code, ...) can launch directly. It is a
+superset of the official automation-only
+[`@deepseek-ai/dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/main/packages/acp/acp):
+every ACP session is a real DSH agent with the same tool access, presets,
+sessions, and settings as the Web GUI.
 
-> Registry-style entry (like [ACP Registry](https://agentclientprotocol.com/get-started/registry)):
+> **Registry-style entry** (see the [ACP Registry](https://agentclientprotocol.com/get-started/registry)):
 >
 > | Field | Value |
 > |---|---|
 > | Name | `dsh-acp-gateway` |
-> | Version | 3.9.0 |
+> | Version | 3.10.0 |
 > | Transport | stdio (JSON-RPC 2.0, newline-delimited) |
 > | Protocol | ACP v1 |
-> | Command | `node <path>/bin/dsh-acp-agent.js` |
-> | Capabilities | streaming, tool calls, sessions (list/load/delete), image/audio, slash commands, session modes, session config options (model / thought level / mode) |
+> | Command | `npx -y dsh-acp-gateway` |
+> | Capabilities | streaming, tool calls, sessions (list/load/delete), image/audio, slash commands, session modes (agent presets), config options (model / thought level / permission) |
+
+## Quick Start
+
+```bash
+# One command — the package brings the full @deepseek-ai/dsh runtime, so no
+# separate server, no global install. First launch downloads ~330 MB once.
+npx -y dsh-acp-gateway
+```
+
+**Zed** — `settings.json`:
+
+```json
+{
+  "agent": {
+    "acp": {
+      "command": "npx",
+      "args": ["-y", "dsh-acp-gateway"]
+    }
+  }
+}
+```
+
+First boot takes ~15-20s (a full DSH instance boots); each agent window is its
+own process that exits with the window. Sessions persist in `~/.dsh`
+(`DSH_ACP_HOME` isolates), so `session/load` resumes them later. Set the model
+provider's API key env var (e.g. `OPENCODE_GO_API_KEY` or `DEEPSEEK_API_KEY`).
 
 ## Features
-
-Compared to the upstream automation-only [`@deepseek-ai/dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/main/packages/acp/acp), this plugin adds:
 
 | Capability | Detail |
 |---|---|
 | ✅ Token-level streaming | `assistant/chunk` text deltas → `agent_message_chunk` |
 | ✅ Tool-call notifications | `tool_call` (pending) → `tool_call_update` (completed/failed) |
-| ✅ Full tool access | mounts the `standard` agent preset: bash, fs, web, skills, subagents, ... |
+| ✅ Full tool access | mounts the selected agent preset: bash, fs, web, skills, subagents, ... |
 | ✅ `session/list` / `session/load` / `session/delete` | resume persisted sessions with history replay |
 | ✅ `usage_update` | token usage from `assistant/message` |
 | ✅ Image / audio prompt content | image → DSH attachment; audio → textual reference |
@@ -29,8 +59,8 @@ Compared to the upstream automation-only [`@deepseek-ai/dsh-acp`](https://github
 | ✅ Session modes | the **agent presets** (the web GUI's modes: Standard / Code(PTC) / Minimal / Creator / your custom presets), `session/set_mode` re-composes the agent, `current_mode_update` |
 | ✅ `user_message_chunk` | echo accepted prompts |
 | ✅ Embedded resource content | `resource` blocks expand into prompt text |
-| ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (the agent presets — same values as `session/set_mode`), `model` (`provider/model`), `thought_level`, `permission` (read-only / workspace-write / danger-full-access); `session/set_config_option` returns the full config state; `config_option_update` notifications |
-| ✅ Permission approval flow | workspace-write asks the client through `session/request_permission` for mutating tools (edit/delete/move/execute); read-only and full-access never ask (sandbox gates the former). Approval policy tracks the permission level |
+| ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (the agent presets), `model` (`provider/model`), `thought_level`, `permission` (read-only / workspace-write / danger-full-access) |
+| ✅ Permission approval flow | workspace-write asks the client through `session/request_permission` for mutating tools (edit/delete/move/execute) |
 | ✅ Elicitation | DSH `ask_user_question` surfaces as an ACP `elicitation/create` form; answers feed back as the tool result |
 | ✅ Thinking stream | `agent_thought_chunk` from DSH reasoning chunks |
 | ✅ Agent plan | `exit_plan_mode` markdown → ACP `plan` notification (entries) |
@@ -40,29 +70,74 @@ Compared to the upstream automation-only [`@deepseek-ai/dsh-acp`](https://github
 
 ```
 ACP client (Zed / VS Code ACP / ...)
-   │  stdio  (launches bin/dsh-acp-agent.js)
+   │  stdio  (launches `dsh-acp-gateway` / `dsh-acp-agent` / `dsh-acp-server`)
    ▼
-bin/dsh-acp-agent.js        ← standalone Node bridge, no DSH dependency
-   │  loopback JSON-RPC + SSE (internal channel)
-   ▼
-DSH process: acp-gateway plugin
-   │  agents.create() → real DSH agent (standard preset, full tools)
+dsh-acp-gateway process (full DSH instance)
+   │  agents.create() → real DSH agent (selected preset, full tools)
    ▼
 DSH agent engine (same as the Web GUI)
 ```
 
-- The bridge is the **only** external transport. The loopback HTTP channel is an implementation detail, not an exposed HTTP capability.
-- Each ACP session maps to a real DSH agent/session (durable, resumable via `session/load`).
+- **Direct mode (default for editors)**: the client launches the server itself
+  over stdio — stdio is the ACP channel, and the process exits when the client
+  closes (1:1 lifecycle, no orphans).
+- **Bridge mode**: `dsh-acp-agent` is a thin stdio bridge to a long-running
+  `dsh-acp-server` (endpoint discovery: `DSH_ACP_URL` → `~/.dsh/acp/endpoint`
+  → `http://127.0.0.1:3080`); one server can serve many clients/sessions.
+- Each ACP session maps to a real DSH agent/session (durable, resumable via
+  `session/load`).
 
 ## Installation
 
-### 0. Zero-install: `npx` (recommended for editors)
+### 1. Zero-install: `npx` (recommended for editors)
 
-The package depends on the full `@deepseek-ai/dsh` runtime, so `npx` gives you a
-complete, self-contained ACP agent in one command — no separate server, no
-manual process management (stdio-bound lifecycle: close the agent, the server
-exits). The first launch downloads the closure (~330 MB), later ones reuse the
-npx cache.
+See [Quick Start](#quick-start). The package depends on the full
+`@deepseek-ai/dsh` runtime, so it is self-contained — no globally installed
+dsh app, no separate server process, no manual lifecycle.
+
+### 2. Offline archive (no npm, no network)
+
+Build a self-contained tarball with the full dependency closure, the shipped
+presets, and a portable vendor anchor. It expects a system `node >= 20`
+(`--embed-node` bundles a Node binary instead):
+
+```bash
+bash scripts/package-offline.sh               # → dist-offline/dsh-acp-gateway-<ver>.tar.gz
+bash scripts/package-offline.sh out --embed-node   # embed a Node runtime (~156 MB)
+```
+
+Extract anywhere and point an ACP client at the bundled launcher:
+
+```json
+{
+  "agent": { "acp": { "command": "/path/to/extracted/dsh-acp", "args": [] } }
+}
+```
+
+> The closure contains platform-specific native prebuilds (node-pty etc.), so
+> build the archive on each target platform.
+
+### 3. Deploy as a plugin inside a DSH deployment
+
+```bash
+npm install dsh-acp-gateway
+# or clone this repo and: npm link
+```
+
+Add to your deployment `cordis.yml` (host plane):
+
+```yaml
+- id: acp-gateway
+  name: 'dsh-acp-gateway'
+  config: {}
+```
+
+Requires the standard host services (`agents`, `webServer`, `fs`, `shell`,
+`agentDefaultModel`, `approval`, `agentPresets`, `commands`, `attachments`,
+`sessionQuery`). On start the plugin writes the stdio bridge to
+`~/.dsh/acp/dsh-acp-agent.js` (endpoint embedded).
+
+## Client setup
 
 **Zed** — `settings.json`:
 
@@ -88,101 +163,80 @@ npx cache.
 }
 ```
 
-The first boot takes ~15-20s (it boots a full DSH instance); afterwards each
-Zed agent window is its own server process that exits with the window. Sessions
-persist in `~/.dsh` (set `DSH_ACP_HOME` to isolate), so `session/load` resumes
-them after a restart.
+**Any other ACP client** — point it at `npx -y dsh-acp-gateway`, or at a
+local install (`npm i -g ./dsh-acp-gateway-<ver>.tgz` then
+`dsh-acp-gateway`), or at the extracted offline launcher
+(`/path/to/dsh-acp`).
 
-### 1. Install the plugin package (deployment integration)
+## Usage
 
-```bash
-npm install dsh-acp-gateway
-# or clone this repo and: npm link
-```
+### Commands
 
-### 2. Enable it in DSH
-
-Add to your deployment `cordis.yml` (host plane):
-
-```yaml
-- id: acp-gateway
-  name: 'dsh-acp-gateway'
-  config: {}
-```
-
-Requires `@deepseek-ai/dsh-tools` (peer), plus the standard host services (`agents`, `webServer`, `fs`, `shell`, `agentDefaultModel`, `approval`, `agentPresets`, `planMode`, `commands`, `attachments`, `sessionQuery`).
-
-On start the plugin writes the stdio bridge to `~/.dsh/acp/dsh-acp-agent.js` (endpoint embedded), or you can use the package bin directly.
-
-### 3. Offline archive
-
-For machines without npm access (or without Node), build a self-contained
-archive with the package's own closure, the shipped presets, and an embedded
-Node runtime:
+| Command | Purpose |
+|---|---|
+| `dsh-acp-gateway` | the ACP agent itself (stdio direct mode) |
+| `dsh-acp-server` | alias of the above |
+| `dsh-acp-agent` | stdio bridge to a long-running server (bridge mode) |
+| `dsh-acp-client` | a scripted test client |
 
 ```bash
-bash scripts/package-offline.sh          # → dist-offline/dsh-acp-gateway-<ver>.tar.gz
-```
-
-Extract anywhere and point an ACP client at the bundled launcher:
-
-```json
-{
-  "agent": { "acp": { "command": "/path/to/extracted/dsh-acp", "args": [] } }
-}
-```
-
-The bridge resolves the DSH endpoint from, in order: `DSH_ACP_URL` env var → `~/.dsh/acp/endpoint` file → `http://127.0.0.1:3080`.
-
-## One-command server
-
-Launch the embedded server directly — it boots a full DSH instance (official
-`dsh-base` agent stack on a loopback port) and serves ACP over its own stdio:
-
-```bash
-npx dsh-acp-gateway              # same as: npx dsh-acp-server
+npx dsh-acp-gateway
 # --provider opencode-go --model deepseek-v4-flash (defaults, env-overridable)
-# Set the provider's API key env var, e.g. OPENCODE_GO_API_KEY or DEEPSEEK_API_KEY
 ```
 
-The server resolves the `@deepseek-ai/dsh` runtime from its own node_modules
-(the package depends on it), so it works without a globally installed dsh app.
+By default the server **shares your deployment home (`~/.dsh`)**: presets
+(including locally authored ones like `anchored-standard`), settings (default
+model, default preset, permission), sessions, and credentials are exactly the
+ones the web GUI uses. Set `DSH_ACP_HOME` (e.g. `~/.dsh-acp`) for a fully
+isolated instance.
 
-By default the server **shares your deployment home (`~/.dsh`)**: agent
-presets (including locally authored ones), settings (default model, default
-preset, permission), sessions, and credentials are exactly the ones the web
-GUI uses, so every feature behaves identically. Set `DSH_ACP_HOME` (e.g.
-`~/.dsh-acp`) for a fully isolated instance that touches nothing in the real
-deployment — the preset roster then contains only the shipped presets plus
-whatever you author inside the isolated home's `.agent-presets`.
+### Session modes = agent presets
 
-You can also reuse the official CLI and attach the gateway to an isolated
-profile (web UI + full agent stack, still isolated via `DSH_HOME`):
+ACP session modes are the **agent presets** — the same "modes" the web GUI
+offers (Standard / Code / Minimal / Creator, plus your custom presets). The
+current mode follows the deployment default (`agent-presets.default` in
+settings); `session/set_mode` or the `mode` config option switches the preset,
+re-composing the agent at the next prompt. Plan mode is **not** a mode: it is
+toggled through the `/plan` and `/plan off` slash commands, exactly like the
+web GUI's Plan chip.
 
-```bash
-DSH_HOME=~/.dsh-acp npx @deepseek-ai/dsh --profile web \
-  --patch node_modules/dsh-acp-gateway/examples/web.patch.yml
-```
-
-Either way the bridge (`dsh-acp-agent`) finds the instance through
-`DSH_ACP_URL` → `~/.dsh/acp/endpoint` → `http://127.0.0.1:3080`.
-
-## Test client
-
-A small ACP client for driving the gateway the way an editor would — handy for
-verifying behavior without an editor:
+### Test client
 
 ```bash
-node bin/dsh-acp-client.js                        # interactive, via the bridge
-node bin/dsh-acp-client.js --endpoint http://127.0.0.1:56045
+npx dsh-acp-client                        # interactive, via the bridge
+npx dsh-acp-client --endpoint http://127.0.0.1:56045
 echo 'init
 new /tmp
-prompt 运行 pwd 并报告' | node bin/dsh-acp-client.js   # scripted
+prompt 运行 pwd 并报告' | npx dsh-acp-client   # scripted
 ```
 
 Commands: `init`, `new [cwd]`, `prompt <text>`, `mode <preset-id>`,
 `set <configId> <value>` (mode/provider/model/thought_level/permission),
 `cancel`, `list`, `load <id>`, `delete <id>`.
+
+## Protocol coverage
+
+Implemented methods (Agent side): `initialize`, `authenticate` (no-op), `session/new`, `session/prompt`, `session/cancel`, `session/list`, `session/load`, `session/delete`, `session/set_mode`, `session/set_config_option`.
+
+Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`, `config_option_update`.
+
+Session config options: `mode` (the agent presets — standard / code(PTC) / minimal / creation / your custom presets), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). Changing `mode`, `model`, or `thought_level` rebuilds the live agent from its persisted session; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). Both `configOptions` and the `modes` field are returned (transition period per the spec).
+
+Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). DSH `ask_user_question` maps to an ACP `elicitation/create` form.
+
+Content: `text`, `resource` (embedded context), `resource_link`, `image`, `audio`.
+
+Not implemented (by design): client-cooperative capabilities (`fs/*`, `terminal/*`, `elicitation/*`), MCP server connection, HTTP transport.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Editor stuck on "loading" | The bridge could not reach any endpoint. Check `~/.dsh/acp/endpoint` points at a live server (`DSH_ACP_URL` overrides), or use direct mode (`npx -y dsh-acp-gateway`). The bridge now answers with a JSON-RPC error and re-reads the endpoint file instead of hanging |
+| Typing `/` shows no slash commands | Zed drops `available_commands_update` sent before the `session/new` response ([zed#60199](https://github.com/zed-industries/zed/issues/60199)); this gateway holds notifications until after the response — restart the agent and create a fresh session |
+| `session/delete` leaves sessions behind | Fixed: persisted session dirs are removed with direct fs |
+| Multiple ACP instances | Multiple clients can share one server (bridge mode); each direct-mode process is its own full DSH instance (~30-60 MB RSS each, 15-20s boot) |
+| Plan mode does nothing | Plan is toggled via `/plan` / `/plan off` slash commands, not a session mode |
 
 ## Development
 
@@ -213,7 +267,7 @@ npm publish
 Offline archive (for machines without npm/Node):
 
 ```bash
-npm run pack-offline   # → dist-offline/dsh-acp-gateway-<ver>.tar.gz (~100 MB)
+npm run pack-offline   # → dist-offline/dsh-acp-gateway-<ver>.tar.gz (~119 MB)
 ```
 
 The runtime depends on the dsh installation's packages (resolved through the
@@ -223,20 +277,6 @@ restore the links with:
 ```bash
 ./scripts/link-deps.sh
 ```
-
-## Protocol coverage
-
-Implemented methods (Agent side): `initialize`, `authenticate` (no-op), `session/new`, `session/prompt`, `session/cancel`, `session/list`, `session/load`, `session/delete`, `session/set_mode`, `session/set_config_option`.
-
-Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`, `config_option_update`.
-
-Session config options: `mode` (the agent presets — standard / code(PTC) / minimal / creation / your custom presets; identical values to `session/set_mode`), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). Changing `mode`, `model`, or `thought_level` rebuilds the live agent from its persisted session; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). Plan mode is **not** a session mode: it is toggled through the `/plan` and `/plan off` slash commands, exactly like the web GUI's Plan chip. Both `configOptions` and the `modes` field are returned (transition period per the spec).
-
-Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). DSH `ask_user_question` maps to an ACP `elicitation/create` form.
-
-Content: `text`, `resource` (embedded context), `resource_link`, `image`, `audio`.
-
-Not implemented (by design): client-cooperative capabilities (`fs/*`, `terminal/*`, `elicitation/*`), MCP server connection, HTTP transport.
 
 ## License
 

@@ -1,7 +1,15 @@
 {
   "name": "dsh-acp-gateway",
   "version": "3.10.0",
-  "description": "Distributable DSH (DeepSeek Harness) agent exposing a full ACP v1 agent over stdio: streaming, tool calls, sessions, image/audio, slash commands, session modes (agent presets), config options (model/thought level). Ships the whole DSH runtime as dependencies, so `npx dsh-acp-gateway` is a complete, self-contained ACP agent.",
+  "description": "Third-party, complete DeepSeek Harness agent over the Agent Client Protocol (ACP) — a superset of the official automation-only @deepseek-ai/dsh-acp: streaming, tool calls, sessions, slash commands, agent presets, config options. npx one-command, offline archive, works with Zed / VS Code ACP / Claude Code.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devloom1024/dsh-acp-gateway.git"
+  },
+  "homepage": "https://github.com/devloom1024/dsh-acp-gateway",
+  "bugs": {
+    "url": "https://github.com/devloom1024/dsh-acp-gateway/issues"
+  },
   "type": "module",
   "main": "dist/src/index.js",
   "exports": {
