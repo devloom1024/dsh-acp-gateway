@@ -1,6 +1,6 @@
 {
   "name": "dsh-acp-gateway",
-  "version": "3.8.0",
+  "version": "3.9.0",
   "description": "Distributable DSH (DeepSeek Harness) plugin exposing a full ACP v1 agent over stdio: streaming, tool calls, sessions, image/audio, slash commands, session modes, config options (model/thought level). Ships a one-command isolated ACP server.",
   "type": "module",
   "main": "dist/src/index.js",

@@ -7,7 +7,7 @@ A distributable [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 > | Field | Value |
 > |---|---|
 > | Name | `dsh-acp-gateway` |
-> | Version | 3.8.0 |
+> | Version | 3.9.0 |
 > | Transport | stdio (JSON-RPC 2.0, newline-delimited) |
 > | Protocol | ACP v1 |
 > | Command | `node <path>/bin/dsh-acp-agent.js` |
@@ -29,7 +29,12 @@ Compared to the upstream automation-only [`@deepseek-ai/dsh-acp`](https://github
 | ✅ Session modes | `code` / `plan` (maps DSH plan mode), `session/set_mode`, `current_mode_update` |
 | ✅ `user_message_chunk` | echo accepted prompts |
 | ✅ Embedded resource content | `resource` blocks expand into prompt text |
-| ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (code/plan), `model`, `provider`, `thought_level`, and `permission` (read-only / workspace-write / danger-full-access); `session/set_config_option` returns the full config state; `config_option_update` notifications |
+| ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (code/plan), `model` (`provider/model`), `thought_level`, `permission` (read-only / workspace-write / danger-full-access), and `preset` (standard / code(PTC) / minimal / creation); `session/set_config_option` returns the full config state; `config_option_update` notifications |
+| ✅ Permission approval flow | workspace-write asks the client through `session/request_permission` for mutating tools (edit/delete/move/execute); read-only and full-access never ask (sandbox gates the former). Approval policy tracks the permission level |
+| ✅ Elicitation | DSH `ask_user_question` surfaces as an ACP `elicitation/create` form; answers feed back as the tool result |
+| ✅ Thinking stream | `agent_thought_chunk` from DSH reasoning chunks |
+| ✅ Agent plan | `exit_plan_mode` markdown → ACP `plan` notification (entries) |
+| ✅ Session info | `session_info_update` on title changes |
 
 ## Architecture
 
@@ -166,7 +171,9 @@ Implemented methods (Agent side): `initialize`, `authenticate` (no-op), `session
 
 Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`, `config_option_update`.
 
-Session config options: `mode` (code/plan — controls how the agent requests permission), `model` (catalog from the selected provider), `provider` (all registered DSH LLM providers), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access, applied as a `sandbox/mode` session event). Changing `provider`, `model`, or `thought_level` rebuilds the live agent from its persisted session with the new options; changing `mode` switches DSH plan mode immediately; changing `permission` applies immediately. Both `configOptions` and the legacy `modes` field are returned (transition period per the spec).
+Session config options: `mode` (code/plan), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access), `preset` (standard / code / minimal / creation — the web's agent modes). Changing `model`, `thought_level`, or `preset` rebuilds the live agent from its persisted session; `mode` switches DSH plan mode; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). Both `configOptions` and the legacy `modes` field are returned (transition period per the spec).
+
+Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). DSH `ask_user_question` maps to an ACP `elicitation/create` form.
 
 Content: `text`, `resource` (embedded context), `resource_link`, `image`, `audio`.
 

@@ -37,8 +37,19 @@ import type {
   AgentHandle,
   DshAgent,
 } from './dsh.js'
-import { turnEndToStopReason, toolKind, toolTitle, locationFromArgs, diffFromArgs, makeNeverSignal, sessionModeState, buildConfigOptions, buildBridgeScript } from './codec.js'
-import type { StopReason, SessionUpdate, ConfigOption } from './types.js'
+import {
+  turnEndToStopReason,
+  toolKind,
+  toolTitle,
+  locationFromArgs,
+  diffFromArgs,
+  makeNeverSignal,
+  sessionModeState,
+  buildConfigOptions,
+  buildBridgeScript,
+  planMarkdownToEntries,
+} from './codec.js'
+import type { StopReason, SessionUpdate, ConfigOption, PlanEntry } from './types.js'
 import { randomUUID } from 'node:crypto'
 
 export const name = 'acp-gateway'
@@ -89,6 +100,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const llmNow = (): LlmService | undefined => ctx.get('llm')
   const approvalNow = (): ApprovalService | undefined => ctx.get('approval')
   const agentPresetsNow = (): AgentPresetsService | undefined => ctx.get('agentPresets')
+  const userQuestionsNow = (): any => ctx.get('userQuestions')
 
 
   // ---- model selection -------------------------------------------------
@@ -163,18 +175,23 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   }
 
   // ---- agent assembly ---------------------------------------------------
+  /** The session being created/resumed right now (read by agentSetup). */
+  let setupSessionId: string | null = null
   const agentSetup = async (agentCtx: any): Promise<void> => {
     try {
-      // Full tool access + system prompt, same as the Web GUI. In the
-      // standalone (isolated) deployment the composition supplies tools
-      // directly, so preset mounting is best-effort: when no preset registry
-      // is configured (or it lacks `standard`), the agent keeps whatever the
-      // composition mounted at the agent scope.
+      // Full tool access + system prompt, same as the Web GUI. The preset is
+      // the session's selected one (standard by default); when no preset
+      // registry is configured, the agent keeps whatever the composition
+      // mounted at the agent scope.
       const agentPresets = agentPresetsNow()
       if (agentPresets) {
         try {
+          const cfg = setupSessionId ? sessionConfigs.get(setupSessionId) : undefined
+          const presetId = (cfg && cfg.preset) || 'standard'
           const presets = await agentPresets.list()
-          if (presets.some((p) => p.id === 'standard')) {
+          if (presets.some((p) => p.id === presetId)) {
+            await agentPresets.mount(agentCtx, presetId)
+          } else if (presets.some((p) => p.id === 'standard')) {
             await agentPresets.mount(agentCtx, 'standard')
           }
         } catch (e) {
@@ -192,12 +209,133 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     } catch (e) {
       /* ignore */
     }
+    // Ask decision source: in workspace-write mode, mutating tools request
+    // client approval (read-only tools pass; the sandbox gates read-only mode).
+    // client approval (read-only tools pass; the sandbox gates read-only mode).
+    try {
+      ;(agentCtx as any).on('tools/pre-execute', async (exec: any, next: () => Promise<any>) => {
+        try {
+          const agent = exec && exec.agent
+          const mode = agent ? sandboxModeFor(agent) : null
+          if (mode !== 'workspace-write') return next()
+          // Only mutating operations ask (edits/deletes/moves/executions);
+          // reads, searches, fetches, and interaction tools (ask_user_question,
+          // todo_write, ...) pass — approval is a mutation gate, not a blanket one.
+          const MUTATING_KINDS = new Set(['edit', 'delete', 'move', 'execute'])
+          const kind = toolKind(exec && exec.name)
+          if (!MUTATING_KINDS.has(kind)) return next()
+          // Waterfall: wrap the rest of the chain and override the decision.
+          return next().then((decision: any) =>
+            decision && decision.kind === 'allow'
+              ? { kind: 'ask', reason: `tool "${exec && exec.name}" requires approval in workspace-write mode` }
+              : decision,
+          )
+        } catch (e) {
+          return next()
+        }
+      })
+    } catch (e) {
+      /* no tools channel */
+    }
+    // Elicitation: a per-agent `ask_user_question` that surfaces as an ACP
+    // elicitation/create form. Registered at agent scope (the host tool from
+    // dsh-tool-ask-user routes through the userQuestions provider slot, which
+    // the web UI owns; a per-agent registration shadows it for ACP sessions).
+    try {
+      if (agentCtx.tools) {
+        agentCtx.tools.register(
+          defineTool({
+            name: 'ask_user_question',
+            description: 'Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. Send one or more questions, each with a stable id that will be echoed in the answer.',
+            parameters: {
+              questions: {
+                type: 'array',
+                required: true,
+                description: 'Questions to ask the user before continuing.',
+                items: {
+                  type: 'object',
+                  additionalProperties: true,
+                  properties: {
+                    id: { type: 'string', required: true, description: 'Stable id for this question; echoed in the answer.' },
+                    question: { type: 'string', required: true, description: 'The specific question to ask the user.' },
+                    header: { type: 'string', description: 'Optional short heading/group label.' },
+                    detail: { type: 'string', description: 'Optional supporting detail.' },
+                    options: { type: 'array', description: 'Optional choices the UI can render as a menu.', items: { type: 'object', additionalProperties: false, properties: { label: { type: 'string' }, description: { type: 'string' } } } },
+                    multi_select: { type: 'boolean', description: 'Whether more than one option may be selected.' },
+                  },
+                },
+              },
+            } as any,
+            output: {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  answers: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        id: { type: 'string' },
+                        selected: { type: 'array', items: { type: 'string' } },
+                        custom: { type: 'string' },
+                      },
+                    },
+                  },
+                },
+              },
+              render: (_args: any, value: any) => [{ type: 'text', text: JSON.stringify(value) }],
+            },
+            async execute(args: any, exec: any) {
+              const items: any[] = Array.isArray(args && args.questions) ? args.questions : []
+              const properties: Record<string, unknown> = {}
+              const required: string[] = []
+              for (const q of items) {
+                properties[q.id] = {
+                  type: 'string',
+                  title: q.question,
+                  ...(q.detail ? { description: q.detail } : {}),
+                  ...(q.options && q.options.length ? { enum: q.options.map((o: any) => o.label) } : {}),
+                }
+                if (!q.multi_select) required.push(q.id)
+              }
+              const sid = exec && exec.agent && exec.agent.session && exec.agent.session.id
+              const response = await sendClientRequest('elicitation/create', {
+                ...(typeof sid === 'string' ? { sessionId: sid } : {}),
+                message: items.map((q: any) => q.question).join('\n') || 'Please answer',
+                mode: 'form',
+                requestedSchema: { type: 'object', properties, required },
+              })
+              const result = response && response.result
+              if (result && result.action === 'accepted' && result.answers && typeof result.answers === 'object') {
+                return {
+                  answers: items.map((q: any) => {
+                    const value = result.answers[q.id]
+                    const selected = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? [value] : []
+                    return { id: q.id, selected, ...(typeof value === 'string' ? { custom: value } : {}) }
+                  }),
+                }
+              }
+              throw new Error('elicitation dismissed by user')
+            },
+          }),
+        )
+      }
+    } catch (e: unknown) {
+    }
   }
   const configureAgent = (agent: DshAgent): void => {
     try {
-      // Auto-approve tool calls: the ACP client is the permission surface.
+      // Approval policy follows the session's permission level: workspace-write
+      // asks through the ACP client (request_permission); read-only and
+      // full-access never ask (the sandbox enforces the former, nothing gates
+      // the latter).
       const approval = approvalNow()
-      if (approval) approval.setPolicy(agent, 'never')
+      if (approval) {
+        const mode = agent.session ? sandboxModeFor(agent) : null
+        approval.setPolicy(agent, mode === 'workspace-write' ? 'ask' : 'never')
+      }
     } catch (e) {
       /* ignore */
     }
@@ -236,11 +374,14 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
 
   // ---- state ------------------------------------------------------------
   const handles = new Map<string, AgentHandle>()
-  const sessionConfigs = new Map<string, { providerId?: string; modelId?: string; reasoningEffort?: string }>()
-  const appliedOptions = new Map<string, { provider?: string | null; model?: string | null; reasoningEffort?: string | null }>()
+  const sessionConfigs = new Map<string, { providerId?: string; modelId?: string; reasoningEffort?: string; preset?: string }>()
+  const appliedOptions = new Map<string, { provider?: string | null; model?: string | null; reasoningEffort?: string | null; preset?: string }>()
   const subscribers = new Set()
   const inflightPrompts = new Map<string, { turn: number; clearTimer: () => void; resolve: (reason: StopReason) => void; reject: (err: Error) => void }>()
   const announcedToolCalls = new Set<string>()
+  /** Agent -> Client JSON-RPC requests awaiting a response (permission, elicitation). */
+  const pendingClientRequests = new Map<number, (resp: any) => void>()
+  let clientRequestSeq = 1
   const toolCallArgs = new Map<string, { name: string; arguments: any }>() // callId -> call facts (for diff reconstruction)
   const newSessionId = () => `sess_acp_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`
 
@@ -260,6 +401,35 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     subscribers.add(sub)
     return () => subscribers.delete(sub)
   }
+  /** Send a raw JSON-RPC message to every client (notifications and requests). */
+  const broadcastRaw = (message: unknown): void => {
+    const json = JSON.stringify(message)
+    for (const sub of subscribers as Set<{ send: (json: string) => void }>) {
+      try {
+        sub.send(json)
+      } catch (e) {
+        /* keep going */
+      }
+    }
+  }
+  /**
+   * Send a client-bound request (session/request_permission, elicitation/request)
+   * and await its response. The bridge forwards the request to the client's
+   * stdout and routes the client's response back through /acp/rpc.
+   */
+  const sendClientRequest = (method: string, params: any): Promise<any> =>
+    new Promise((resolve) => {
+      const id = clientRequestSeq++
+      const clearTimer = ctx.timeout(() => {
+        pendingClientRequests.delete(id)
+        resolve(null)
+      }, 120000)
+      pendingClientRequests.set(id, (resp: any) => {
+        clearTimer()
+        resolve(resp)
+      })
+      broadcastRaw({ jsonrpc: '2.0', id, method, params })
+    })
   const notifyUpdate = (acpSessionId: string, update: SessionUpdate): void => {
     broadcast({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: acpSessionId, update } })
   }
@@ -275,6 +445,12 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             sessionUpdate: 'agent_message_chunk',
             messageId: `msg_${event.data.turn}_${event.data.step}`,
             content: { type: 'text', text: chunk.text },
+          })
+        } else if (chunk.type === 'reasoning' || chunk.type === 'thinking') {
+          notifyUpdate(acpSessionId, {
+            sessionUpdate: 'agent_thought_chunk',
+            messageId: `thought_${event.data.turn}_${event.data.step}`,
+            content: { type: 'text', text: chunk.text || '' },
           })
         } else if (chunk.type === 'tool-call-delta') {
           // Only the first delta of a call announces pending; deltas stream after.
@@ -320,6 +496,15 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       case 'tool/call': {
         const key = String(event.data.callId)
         const name = event.data.name
+        if (name === 'exit_plan_mode' || name === 'exit-plan-mode') {
+          try {
+            const argsObj = typeof event.data.arguments === 'string' ? JSON.parse(event.data.arguments) : event.data.arguments
+            const entries = planMarkdownToEntries(argsObj && argsObj.plan)
+            if (entries.length > 0) notifyUpdate(acpSessionId, { sessionUpdate: 'plan', entries })
+          } catch (e) {
+            /* best effort */
+          }
+        }
         const location = locationFromArgs(event.data.arguments)
         toolCallArgs.set(key, { name, arguments: event.data.arguments })
         const payload = {
@@ -366,6 +551,17 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           content: content.length ? content : undefined,
           rawOutput: textBlocks.length ? { text: textBlocks.map((b) => b.text).join('\n') } : undefined,
         })
+        break
+      }
+      case 'session/title': {
+        const title = event.data && event.data.title
+        if (typeof title === 'string') {
+          notifyUpdate(acpSessionId, {
+            sessionUpdate: 'session_info_update',
+            title,
+            updatedAt: new Date().toISOString(),
+          })
+        }
         break
       }
       case 'plan/mode': {
@@ -562,7 +758,17 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const modelOptions = await allModelOptions()
     const handleAgent = handle ? handle.agent : null
     const sandboxMode = handleAgent ? sandboxModeFor(handleAgent) : null
-    return buildConfigOptions({
+    const presetOptions: { value: string; name: string }[] = []
+    const ap = agentPresetsNow()
+    if (ap) {
+      try {
+        for (const p of await ap.list()) presetOptions.push({ value: p.id, name: p.id })
+      } catch (e) {
+        /* no presets */
+      }
+    }
+    const presetId = (cfg && cfg.preset) || 'standard'
+    const options = buildConfigOptions({
       currentModeId: modeState.currentModeId,
       availableModes: modeState.availableModes,
       modelId: providerId && modelId ? `${providerId}/${modelId}` : null,
@@ -570,6 +776,10 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       modelOptions,
       sandboxMode,
     })
+    if (presetOptions.length > 0) {
+      options.push({ id: 'preset', name: 'Agent Preset', description: 'Agent preset (standard / PTC / minimal / creation)', category: 'mode', type: 'select', currentValue: presetId, options: presetOptions })
+    }
+    return options
   }
   /** Whether the live agent was built with the session's current desired config. */
   const needsRebuild = (acpSessionId: string): boolean => {
@@ -579,18 +789,22 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const desiredProvider = cfg.providerId || sel.provider || null
     const desiredModel = cfg.modelId || sel.model || null
     const desiredEffort = cfg.reasoningEffort || sel.reasoningEffort || null
+    const desiredPreset = cfg.preset || 'standard'
     return (
       desiredProvider !== (applied.provider || null) ||
       desiredModel !== (applied.model || null) ||
-      desiredEffort !== (applied.reasoningEffort || null)
+      desiredEffort !== (applied.reasoningEffort || null) ||
+      desiredPreset !== (applied.preset || 'standard')
     )
   }
   const recordApplied = (acpSessionId: string): void => {
     const opts = agentOptionsFor(acpSessionId)
+    const cfg = sessionConfigs.get(acpSessionId)
     appliedOptions.set(acpSessionId, {
       provider: opts.provider || null,
       model: opts.model || null,
       reasoningEffort: opts.reasoningEffort || null,
+      preset: (cfg && cfg.preset) || 'standard',
     })
   }
   /**
@@ -637,8 +851,21 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
 
   // ---- protocol dispatch --------------------------------------------------------
   const handleMessage = async (msg: any): Promise<any> => {
-    if (!msg || typeof msg !== 'object' || typeof msg.method !== 'string') {
-      const id = msg && typeof msg.id !== 'undefined' ? msg.id : null
+    if (!msg || typeof msg !== 'object') {
+      return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request' } }
+    }
+    // A response to an outstanding agent→client request (permission/elicitation).
+    if (typeof msg.method !== 'string' && typeof msg.id === 'number') {
+      const pending = pendingClientRequests.get(msg.id)
+      if (pending) {
+        pendingClientRequests.delete(msg.id)
+        pending(msg)
+        return null
+      }
+      return { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Unknown response id' } }
+    }
+    if (typeof msg.method !== 'string') {
+      const id = typeof msg.id !== 'undefined' ? msg.id : null
       return { jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid Request' } }
     }
     const { id, method, params = {} } = msg
@@ -655,7 +882,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
               promptCapabilities: { image: true, audio: true, embeddedContext: true },
               sessionCapabilities: { list: {}, delete: {} },
             },
-            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.8.0' },
+            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.9.0' },
             authMethods: [],
           })
         }
@@ -799,9 +1026,25 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             try {
               // The sandbox-mode switch IS the event; the policy folds it from the log.
               handle.agent.session.append('sandbox/mode', { mode: String(value) })
+              // Keep the approval policy in lockstep (workspace-write asks).
+              const approvalNowSvc = approvalNow()
+              if (approvalNowSvc) approvalNowSvc.setPolicy(handle.agent, String(value) === 'workspace-write' ? 'ask' : 'never')
             } catch (e) {
               return fail(-32603, 'permission switch failed')
             }
+          } else if (configId === 'preset') {
+            const presets = []
+            const ap = agentPresetsNow()
+            if (ap) {
+              try {
+                for (const p of await ap.list()) presets.push(p.id)
+              } catch (e) {
+                /* no presets */
+              }
+            }
+            if (!presets.includes(String(value))) return fail(-32602, `unknown preset: ${String(value)}`)
+            const cfg = sessionConfigs.get(acpSessionId) || {}
+            sessionConfigs.set(acpSessionId, { ...cfg, preset: String(value) })
           } else {
             return fail(-32602, `unknown config option: ${configId}`)
           }
@@ -1033,7 +1276,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             record.steps.push({ request: request.method, id: request.id, response })
             return response
           }
-          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.8.0' } } })
+          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.9.0' } } })
           const cwd = (sandboxPolicyNow() && sandboxPolicyNow()!.workspaceRoot) || '.'
           const newRes = await push({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } })
           const sessionId = newRes && newRes.result ? newRes.result.sessionId : null
@@ -1055,6 +1298,36 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       },
     })
     ctx.effect(() => tools.register(tool) as unknown as () => void)
+  }
+
+  // ---- approval answerer (global scope; the approval waterfall carries the
+  // agent, so an unscoped listener matches every agent) ------------------------
+  try {
+    ;(ctx.on as any)('approval/request', async (req: any, next: (outcome: string) => void) => {
+      const sid = req && req.agent && req.agent.session && req.agent.session.id
+      if (typeof sid !== 'string') return next('unavailable')
+      const toolCallId = req && req.callId ? String(req.callId) : `call_${Date.now().toString(36)}`
+      const response = await sendClientRequest('session/request_permission', {
+        sessionId: sid,
+        toolCall: {
+          toolCallId,
+          title: (req && req.toolName) || 'tool call',
+          kind: toolKind(req && req.toolName),
+        },
+        options: [
+          { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+        ],
+      })
+      const outcome = response && response.result && response.result.outcome
+      if (outcome && outcome.outcome === 'selected') {
+        next(outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected')
+      } else {
+        next('cancelled')
+      }
+    })
+  } catch (e) {
+    /* no approval channel */
   }
 
   // ---- release all agents on stop ------------------------------------------------

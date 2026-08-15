@@ -63,16 +63,26 @@ export interface ConfigOption {
   options?: ConfigOptionValue[]
 }
 
+/** A plan entry (schema PlanEntry). */
+export interface PlanEntry {
+  content: string
+  priority: 'high' | 'medium' | 'low'
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 /** The union of session updates the gateway emits. */
 export type SessionUpdate =
   | { sessionUpdate: 'agent_message_chunk'; messageId: string; content?: { type: 'text'; text: string }; stopReason?: StopReason }
+  | { sessionUpdate: 'agent_thought_chunk'; messageId: string; content?: { type: 'text'; text: string } }
   | { sessionUpdate: 'user_message_chunk'; messageId: string; content: { type: 'text'; text: string } }
+  | { sessionUpdate: 'plan'; entries: PlanEntry[] }
   | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; kind: ToolKind; status: ToolCallStatus; rawInput?: any; locations?: ToolCallLocation[]; _meta?: any }
   | { sessionUpdate: 'tool_call_update'; toolCallId: string; title?: string; kind?: ToolKind; status?: ToolCallStatus; content?: (ContentWrapper | DiffContent)[]; rawInput?: any; rawOutput?: any; locations?: ToolCallLocation[]; _meta?: any }
   | { sessionUpdate: 'usage_update'; used?: number; size?: number }
   | { sessionUpdate: 'available_commands_update'; availableCommands: { name: string; description: string; input?: { hint?: string } }[] }
   | { sessionUpdate: 'current_mode_update'; modeId: string }
   | { sessionUpdate: 'config_option_update'; configOptions: ConfigOption[] }
+  | { sessionUpdate: 'session_info_update'; title?: string; updatedAt?: string }
 
 /** A session/update notification. */
 export interface SessionUpdateNotification {

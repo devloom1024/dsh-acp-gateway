@@ -430,3 +430,24 @@ export function buildConfigOptions(input: ConfigOptionsInput): ConfigOption[] {
   }
   return options
 }
+
+/**
+ * Parse a plan-mode markdown document into ACP plan entries. Every heading
+ * (`#`, `##`, ...) or list item (`- `) line becomes one entry.
+ * @param markdown - the `exit_plan_mode` plan text.
+ * @returns plan entries (never empty when the text is non-empty).
+ */
+export function planMarkdownToEntries(markdown: string): { content: string; priority: 'high' | 'medium' | 'low'; status: 'pending' | 'in_progress' | 'completed' }[] {
+  const entries: { content: string; priority: 'high' | 'medium' | 'low'; status: 'pending' | 'in_progress' | 'completed' }[] = []
+  for (const raw of String(markdown || '').split('\n')) {
+    const line = raw.trim()
+    const heading = line.match(/^#{1,6}\s+(.*)$/)
+    const item = line.match(/^[-*]\s+(.*)$/)
+    if (heading) {
+      entries.push({ content: heading[1], priority: 'high', status: 'pending' })
+    } else if (item) {
+      entries.push({ content: item[1], priority: 'medium', status: 'pending' })
+    }
+  }
+  return entries
+}
