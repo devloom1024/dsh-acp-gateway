@@ -1,7 +1,7 @@
 {
   "name": "dsh-acp-gateway",
   "version": "3.10.0",
-  "description": "Distributable DSH (DeepSeek Harness) plugin exposing a full ACP v1 agent over stdio: streaming, tool calls, sessions, image/audio, slash commands, session modes, config options (model/thought level). Ships a one-command isolated ACP server.",
+  "description": "Distributable DSH (DeepSeek Harness) agent exposing a full ACP v1 agent over stdio: streaming, tool calls, sessions, image/audio, slash commands, session modes (agent presets), config options (model/thought level). Ships the whole DSH runtime as dependencies, so `npx dsh-acp-gateway` is a complete, self-contained ACP agent.",
   "type": "module",
   "main": "dist/src/index.js",
   "exports": {
@@ -10,6 +10,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
+    "dsh-acp-gateway": "dist/src/bin/dsh-acp-server.js",
     "dsh-acp-agent": "dist/src/bin/dsh-acp-agent.js",
     "dsh-acp-server": "dist/src/bin/dsh-acp-server.js",
     "dsh-acp-client": "dist/src/bin/dsh-acp-client.js"
@@ -17,26 +18,20 @@
   "files": [
     "dist",
     "examples",
+    "config/agent-presets",
+    "vendor",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
-    "test": "npm run build && node --test \"dist/tests/*.test.js\""
+    "test": "npm run build && node --test \"dist/tests/*.test.js\"",
+    "vendor": "node scripts/gen-vendor-anchor.mjs",
+    "pack-offline": "bash scripts/package-offline.sh"
   },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-app-boot": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-app-boot": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-host-webserver": {
-      "optional": true
-    }
+  "dependencies": {
+    "@deepseek-ai/dsh": "^0.1.0-rc.6"
   },
   "keywords": [
     "acp",

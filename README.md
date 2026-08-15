@@ -56,7 +56,44 @@ DSH agent engine (same as the Web GUI)
 
 ## Installation
 
-### 1. Install the plugin package
+### 0. Zero-install: `npx` (recommended for editors)
+
+The package depends on the full `@deepseek-ai/dsh` runtime, so `npx` gives you a
+complete, self-contained ACP agent in one command — no separate server, no
+manual process management (stdio-bound lifecycle: close the agent, the server
+exits). The first launch downloads the closure (~330 MB), later ones reuse the
+npx cache.
+
+**Zed** — `settings.json`:
+
+```json
+{
+  "agent": {
+    "acp": {
+      "command": "npx",
+      "args": ["-y", "dsh-acp-gateway"]
+    }
+  }
+}
+```
+
+**VS Code (vscode-acp)** — `settings.json`:
+
+```json
+{
+  "acp.agent": {
+    "command": "npx",
+    "args": ["-y", "dsh-acp-gateway"]
+  }
+}
+```
+
+The first boot takes ~15-20s (it boots a full DSH instance); afterwards each
+Zed agent window is its own server process that exits with the window. Sessions
+persist in `~/.dsh` (set `DSH_ACP_HOME` to isolate), so `session/load` resumes
+them after a restart.
+
+### 1. Install the plugin package (deployment integration)
 
 ```bash
 npm install dsh-acp-gateway
@@ -77,29 +114,21 @@ Requires `@deepseek-ai/dsh-tools` (peer), plus the standard host services (`agen
 
 On start the plugin writes the stdio bridge to `~/.dsh/acp/dsh-acp-agent.js` (endpoint embedded), or you can use the package bin directly.
 
-### 3. Configure your editor
+### 3. Offline archive
 
-**Zed** — `settings.json`:
+For machines without npm access (or without Node), build a self-contained
+archive with the package's own closure, the shipped presets, and an embedded
+Node runtime:
 
-```json
-{
-  "agent": {
-    "acp": {
-      "command": "node",
-      "args": ["/absolute/path/to/dsh-acp-gateway/bin/dsh-acp-agent.js"]
-    }
-  }
-}
+```bash
+bash scripts/package-offline.sh          # → dist-offline/dsh-acp-gateway-<ver>.tar.gz
 ```
 
-**VS Code (vscode-acp)** — `settings.json`:
+Extract anywhere and point an ACP client at the bundled launcher:
 
 ```json
 {
-  "acp.agent": {
-    "command": "node",
-    "args": ["/absolute/path/to/dsh-acp-gateway/bin/dsh-acp-agent.js"]
-  }
+  "agent": { "acp": { "command": "/path/to/extracted/dsh-acp", "args": [] } }
 }
 ```
 
@@ -111,10 +140,13 @@ Launch the embedded server directly — it boots a full DSH instance (official
 `dsh-base` agent stack on a loopback port) and serves ACP over its own stdio:
 
 ```bash
-npx dsh-acp-server            # or: node bin/dsh-acp-server.js
+npx dsh-acp-gateway              # same as: npx dsh-acp-server
 # --provider opencode-go --model deepseek-v4-flash (defaults, env-overridable)
 # Set the provider's API key env var, e.g. OPENCODE_GO_API_KEY or DEEPSEEK_API_KEY
 ```
+
+The server resolves the `@deepseek-ai/dsh` runtime from its own node_modules
+(the package depends on it), so it works without a globally installed dsh app.
 
 By default the server **shares your deployment home (`~/.dsh`)**: agent
 presets (including locally authored ones), settings (default model, default
@@ -161,6 +193,27 @@ in `src/*.ts`; `bin/` artifacts are emitted to `dist/src/bin/`.
 npm run check   # tsc --noEmit (type-check)
 npm run build   # tsc (emit dist/)
 npm test        # build + run unit tests against the build
+```
+
+### Publishing
+
+The package is self-contained for `npx`: it depends on `@deepseek-ai/dsh`
+(which brings the whole runtime closure), ships the preset roster in
+`config/agent-presets`, and carries the portable vendor anchor in `vendor/`
+(regenerate after any dependency change):
+
+```bash
+npm install     # fetch the closure
+npm run vendor  # regenerate vendor/dsh-app/package.json
+npm run build
+npm test
+npm publish
+```
+
+Offline archive (for machines without npm/Node):
+
+```bash
+npm run pack-offline   # → dist-offline/dsh-acp-gateway-<ver>.tar.gz (~100 MB)
 ```
 
 The runtime depends on the dsh installation's packages (resolved through the
