@@ -21,6 +21,7 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci
+      - run: npm run check:registry
       - run: npm run build
       - run: npm test
       # Publish to the official npm registry when NPM_TOKEN is configured

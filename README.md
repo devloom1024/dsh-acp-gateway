@@ -17,6 +17,7 @@ sessions, and settings as the Web GUI.
 > | Transport | stdio (JSON-RPC 2.0, newline-delimited) |
 > | Protocol | ACP v1 |
 > | Command | `npx -y dsh-acp-gateway` |
+> | Registry JSON | https://raw.githubusercontent.com/devloom1024/dsh-acp-gateway/main/registry.json |
 > | Capabilities | streaming, tool calls, sessions (list/load/delete), image/audio, slash commands, session modes (agent presets), config options (model / thought level / permission) |
 
 ## Quick Start
@@ -44,6 +45,31 @@ First boot takes ~15-20s (a full DSH instance boots); each agent window is its
 own process that exits with the window. Sessions persist in `~/.dsh`
 (`DSH_ACP_HOME` isolates), so `session/load` resumes them later. Set the model
 provider's API key env var (e.g. `OPENCODE_GO_API_KEY` or `DEEPSEEK_API_KEY`).
+
+## Self-hosted ACP Registry
+
+This repository also publishes a self-hosted ACP registry entry:
+
+```text
+https://raw.githubusercontent.com/devloom1024/dsh-acp-gateway/main/registry.json
+```
+
+It is a standard ACP registry JSON with an `npx` distribution:
+
+```json
+{
+  "distribution": {
+    "npx": {
+      "package": "dsh-acp-gateway@3.10.0"
+    }
+  }
+}
+```
+
+Clients that support a custom ACP registry URL can use the Raw GitHub URL
+above. The icon is stored at [`assets/dsh-acp-icon.svg`](assets/dsh-acp-icon.svg).
+CI runs `npm run check:registry` to keep `registry.json` and `package.json`
+versions in sync.
 
 ## Features
 

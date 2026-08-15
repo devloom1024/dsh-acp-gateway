@@ -34,6 +34,7 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
+    "check:registry": "node scripts/check-registry.mjs",
     "test": "npm run build && node --test \"dist/tests/*.test.js\"",
     "vendor": "node scripts/gen-vendor-anchor.mjs",
     "pack-offline": "bash scripts/package-offline.sh"

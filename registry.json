@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "dsh-acp-gateway",
+      "name": "DeepSeek Harness ACP Gateway",
+      "version": "3.10.0",
+      "description": "Third-party DeepSeek Harness agent over the Agent Client Protocol (ACP v1): streaming, tool calls, sessions, slash commands, agent presets and config options.",
+      "repository": "https://github.com/devloom1024/dsh-acp-gateway",
+      "website": "https://github.com/devloom1024/dsh-acp-gateway",
+      "authors": [
+        "devloom1024"
+      ],
+      "license": "MIT",
+      "icon": "https://raw.githubusercontent.com/devloom1024/dsh-acp-gateway/main/assets/dsh-acp-icon.svg",
+      "distribution": {
+        "npx": {
+          "package": "dsh-acp-gateway@3.10.0"
+        }
+      }
+    }
+  ],
+  "extensions": []
+}
