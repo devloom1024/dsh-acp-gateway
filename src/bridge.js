@@ -1,0 +1,196 @@
+/**
+ * Stdio bridge core: newline-delimited JSON-RPC in, single-line JSON out.
+ *
+ * Shared by the standalone `dsh-acp-agent` executable and the embedded
+ * `dsh-acp-server` (which attaches its own process stdio to the in-process
+ * loopback endpoint). Requests are forwarded to the gateway's HTTP loopback
+ * channel; `session/update` notifications are forwarded from its SSE stream.
+ *
+ * Endpoint candidates are tried in order (env → endpoint file → default) and
+ * the bridge remembers the first reachable one, failing over to the next
+ * candidate when the active endpoint stops responding (e.g. a stale
+ * `~/.dsh/acp/endpoint` file pointing at a dead instance).
+ *
+ * @module dsh-acp-gateway/bridge
+ */
+import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import readline from 'node:readline'
+
+/** How long a single connection attempt may take before failing over. */
+const CONNECT_TIMEOUT_MS = 2000
+
+/**
+ * Arm a connect-phase-only timeout: `req.setTimeout` is an IDLE timeout and
+ * would destroy long-lived requests (a 30s LLM turn) and SSE streams as soon
+ * as the socket goes quiet. Only the time until the socket connects counts.
+ */
+function armConnectTimeout(req, ms) {
+  req.on('socket', (socket) => {
+    if (!socket.connecting) return
+    const timer = setTimeout(() => req.destroy(new Error('connect timeout')), ms)
+    socket.once('connect', () => clearTimeout(timer))
+  })
+}
+
+/**
+ * Ordered endpoint candidates: env var, then the endpoint file the gateway
+ * writes, then the default DSH web port. Duplicates are removed.
+ * @returns endpoint base URLs, e.g. `['http://127.0.0.1:56045', 'http://127.0.0.1:3080']`.
+ */
+export function resolveEndpoints() {
+  const list = []
+  if (process.env.DSH_ACP_URL) list.push(process.env.DSH_ACP_URL)
+  try {
+    const p = path.join(os.homedir(), '.dsh', 'acp', 'endpoint')
+    const v = fs.readFileSync(p, 'utf8').trim()
+    if (v) list.push(v)
+  } catch (e) {
+    /* no endpoint file */
+  }
+  list.push('http://127.0.0.1:3080')
+  return [...new Set(list)]
+}
+
+/**
+ * First endpoint candidate (backwards-compatible convenience).
+ * @returns endpoint base URL, e.g. `http://127.0.0.1:3080`.
+ */
+export function resolveEndpoint() {
+  return resolveEndpoints()[0]
+}
+
+/**
+ * POST one JSON-RPC body to one endpoint with a connection timeout.
+ * @returns the response text.
+ */
+function postTo(endpoint, body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      `${endpoint}/acp/rpc`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume() // drain and drop the body
+          reject(new Error(`HTTP ${res.statusCode} from ${endpoint}`))
+          return
+        }
+        let data = ''
+        res.setEncoding('utf8')
+        res.on('data', (c) => {
+          data += c
+        })
+        res.on('end', () => resolve(data))
+      },
+    )
+    armConnectTimeout(req, CONNECT_TIMEOUT_MS)
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+/**
+ * Attach the bridge loop to the given stdio streams.
+ * @param input - readable stream (JSON-RPC request lines).
+ * @param output - writable stream (single-line JSON responses and notifications).
+ * @param endpoints - one endpoint or an ordered candidate list (see `resolveEndpoints`).
+ * @param onClose - invoked once when input closes (default: exit the process).
+ * @returns an object with a `close()` disposer.
+ */
+export function attachBridge(input, output, endpoints, onClose = () => process.exit(0)) {
+  const candidates = (Array.isArray(endpoints) ? endpoints : [endpoints]).filter(Boolean)
+  let active = candidates[0] || 'http://127.0.0.1:3080'
+  let closed = false
+
+  const write = (text) => {
+    if (closed) return
+    try {
+      output.write(text + '\n')
+    } catch (e) {
+      /* stream closed */
+    }
+  }
+  const note = (text) => {
+    try {
+      process.stderr.write(`bridge: ${text}\n`)
+    } catch (e) {
+      /* stderr closed */
+    }
+  }
+  /** Run `fn` against the active endpoint, failing over through the others. */
+  const withEndpoint = async (fn) => {
+    const tried = []
+    for (const candidate of [active, ...candidates.filter((c) => c !== active)]) {
+      if (tried.includes(candidate)) continue
+      tried.push(candidate)
+      try {
+        const result = await fn(candidate)
+        if (candidate !== active) {
+          note(`switched endpoint to ${candidate}`)
+          active = candidate
+        }
+        return result
+      } catch (e) {
+        /* try the next candidate */
+      }
+    }
+    throw new Error(`no reachable endpoint in [${candidates.join(', ')}]`)
+  }
+
+  const post = (body) => withEndpoint((candidate) => postTo(candidate, body))
+
+  // Subscribe to Agent -> Client notifications (SSE) and forward each as one line.
+  // Reconnect after a drop; failed attempts fail over like requests do.
+  const connectEvents = (candidate) =>
+    new Promise((resolve, reject) => {
+      const req = http.get(`${candidate}/acp/events`, (res) => resolve(res))
+      armConnectTimeout(req, CONNECT_TIMEOUT_MS)
+      req.on('error', reject)
+    })
+  const subscribeEvents = () => {
+    if (closed) return
+    withEndpoint(connectEvents)
+      .then((res) => {
+        let buf = ''
+        res.setEncoding('utf8')
+        res.on('data', (c) => {
+          buf += c
+          let idx
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, idx)
+            buf = buf.slice(idx + 2)
+            for (const line of frame.split('\n')) {
+              if (line.startsWith('data: ')) write(line.slice(6))
+            }
+          }
+        })
+        res.on('end', () => setTimeout(subscribeEvents, 1000))
+        res.on('error', () => setTimeout(subscribeEvents, 1000))
+      })
+      .catch(() => setTimeout(subscribeEvents, 1000))
+  }
+  subscribeEvents()
+
+  const rl = readline.createInterface({ input, crlfDelay: Infinity })
+  rl.on('line', async (line) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    try {
+      const response = await post(trimmed)
+      if (response) write(response)
+    } catch (e) {
+      note(`request failed: ${String((e && e.message) || e)}`)
+    }
+  })
+  rl.on('close', () => close())
+  const close = () => {
+    if (closed) return
+    closed = true
+    onClose()
+  }
+  return { close }
+}
+
+export default { attachBridge, resolveEndpoint, resolveEndpoints }

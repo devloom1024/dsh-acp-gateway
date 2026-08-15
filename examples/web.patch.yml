@@ -1,0 +1,18 @@
+# dsh-acp-gateway — overlay patch for the official `dsh` CLI.
+#
+# Usage (one-command isolated ACP server; reuses the official CLI + web profile):
+#
+#   DSH_HOME=~/.dsh-acp npx @deepseek-ai/dsh --profile web \
+#     --patch node_modules/dsh-acp-gateway/examples/web.patch.yml
+#
+# Or, to attach the gateway to an EXISTING profile, copy this file's entry
+# into that profile's cordis.patch.yml (hot-reloaded on long-lived surfaces).
+#
+# The gateway needs no configuration; it reads the default model selection
+# and mounts the `standard` preset when available, otherwise uses whatever
+# tools the profile provides.
+
+- insert:
+    - id: acp-gateway
+      name: 'dsh-acp-gateway'
+      config: {}

@@ -1,0 +1,15 @@
+# Enable the DSH ACP Gateway in a DeepSeek Harness deployment.
+#
+# Add this row to your deployment's cordis.yml (host plane). The plugin:
+#   - serves an ACP v1 agent over stdio (via the generated bridge script)
+#   - creates real DSH agents with the `standard` preset (full tool access)
+#   - auto-approves tool calls (the ACP client is the permission surface)
+#   - writes the stdio bridge to ~/.dsh/acp/dsh-acp-agent.js
+#
+# Requires @deepseek-ai/dsh-tools (peer dependency) and the usual host
+# services (agents, webServer, fs, shell, agentDefaultModel, approval,
+# agentPresets, planMode, commands, attachments, sessionQuery).
+
+- id: acp-gateway
+  name: 'dsh-acp-gateway'
+  config: {}
