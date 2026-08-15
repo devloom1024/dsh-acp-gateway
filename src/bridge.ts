@@ -220,6 +220,11 @@ export function attachBridge(
   subscribeEvents()
 
   const rl = readline.createInterface({ input, crlfDelay: Infinity })
+  // Requests currently awaiting an endpoint response. `close` (input EOF)
+  // waits for them so a client that sends a request and closes stdin
+  // immediately still receives its response before the process exits.
+  let inflight = 0
+  let closeRequested = false
   rl.on('line', async (line) => {
     const trimmed = line.trim()
     if (!trimmed) return
@@ -235,6 +240,7 @@ export function attachBridge(
     // while a session-creating/loading request is in flight (see
     // holdsNotifications).
     if (holdsNotifications(trimmed)) holdingNotifications = true
+    inflight += 1
     try {
       const response = await post(trimmed)
       if (response) write(response)
@@ -252,14 +258,20 @@ export function attachBridge(
         for (const held of heldNotifications) write(held)
         heldNotifications.length = 0
       }
+      inflight -= 1
+      if (closeRequested && inflight === 0) doClose()
     }
   })
-  rl.on('close', () => close())
-  const close = () => {
+  rl.on('close', () => {
+    closeRequested = true
+    if (inflight === 0) doClose()
+  })
+  const doClose = () => {
     if (closed) return
     closed = true
     onClose()
   }
+  const close = doClose
   return { close }
 }
 

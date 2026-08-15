@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Build the offline distribution archive: a self-contained tarball that works
-# without npm, without an installed @deepseek-ai/dsh app, and without network.
+# without npm and without an installed @deepseek-ai/dsh app. The archive
+# contains the full runtime dependency closure, the gateway build, the
+# shipped presets, and a portable vendor anchor — but NOT a Node runtime by
+# default: it expects a system `node >= 20` (use `--embed-node` to bundle a
+# copy of the build machine's node binary).
+#
+# The closure contains platform-specific native prebuilds (node-pty etc.), so
+# the archive is per-platform (darwin-arm64 / linux-x64 / windows-x64 ...):
+# build it on the target platform.
 #
 # Contents:
 #   node_modules/            the full DSH runtime dependency closure (real
@@ -8,12 +16,11 @@
 #   dist/ examples/          the gateway build
 #   config/agent-presets/    the shipped presets (standard/code/minimal/cordis)
 #   vendor/dsh-app/          the portable anchor the server falls back to
-#   bin/node                 an embedded Node runtime (copied from the build
-#                            machine), so only the archive is required
-#   dsh-acp                  launcher: execs the embedded node
+#   bin/node                 embedded Node runtime (only with --embed-node)
+#   dsh-acp                  launcher: embedded node, else system node
 #
 # Usage:
-#   bash scripts/package-offline.sh [output-dir]
+#   bash scripts/package-offline.sh [output-dir] [--embed-node]
 #
 # Prerequisites: `npm run build` done, and the repo's node_modules symlink
 # farm (or a real install) present — the full closure is resolved through the
@@ -22,11 +29,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${1:-$ROOT/dist-offline}"
+EMBED_NODE=0
+if [ "${2:-}" = "--embed-node" ]; then EMBED_NODE=1; fi
 NAME="dsh-acp-gateway-$(node -p "require('$ROOT/package.json').version")"
 STAGE="$(mktemp -d -t dsh-acp-offline)"
 trap 'rm -rf "$STAGE"' EXIT
 
-echo "== assembling $NAME"
+echo "== assembling $NAME (embed-node=$EMBED_NODE)"
 
 # 1. Full dependency closure. The repo's node_modules is a symlink farm into
 #    the dsh app install; resolve the app's node_modules through it and copy
@@ -61,24 +70,30 @@ cp -R "$ROOT/config/agent-presets" "$STAGE/config/agent-presets"
 DSH_VENDOR_MODULES="$STAGE/node_modules" node "$ROOT/scripts/gen-vendor-anchor.mjs"
 cp -R "$ROOT/vendor" "$STAGE/vendor"
 
-# 4. Embedded Node runtime, when available.
-if NODE_BIN="$(command -v node || true)" && [ -n "$NODE_BIN" ]; then
-  NODE_REAL="$(node -e "process.stdout.write(require('node:fs').realpathSync(process.argv[1]))" "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")"
-  mkdir -p "$STAGE/bin"
-  cp "$NODE_REAL" "$STAGE/bin/node"
-  chmod +x "$STAGE/bin/node"
-  echo "embedded node: $("$STAGE/bin/node" --version 2>/dev/null || echo unavailable)"
-else
-  echo "warning: no node binary found; the archive will require a system node >= 20" >&2
+# 4. Embedded Node runtime (optional; default expects a system node).
+if [ "$EMBED_NODE" = "1" ]; then
+  if NODE_BIN="$(command -v node || true)" && [ -n "$NODE_BIN" ]; then
+    NODE_REAL="$(node -e "process.stdout.write(require('node:fs').realpathSync(process.argv[1]))" "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")"
+    mkdir -p "$STAGE/bin"
+    cp "$NODE_REAL" "$STAGE/bin/node"
+    chmod +x "$STAGE/bin/node"
+    echo "embedded node: $("$STAGE/bin/node" --version 2>/dev/null || echo unavailable)"
+  else
+    echo "warning: --embed-node requested but no node binary found" >&2
+  fi
 fi
 
-# 5. Launcher: prefer the embedded node, fall back to a system node.
+# 5. Launcher: prefer the embedded node, fall back to a system node >= 20.
 cat > "$STAGE/dsh-acp" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 NODE="$DIR/bin/node"
 if [ ! -x "$NODE" ]; then NODE="$(command -v node)"; fi
+if [ -z "$NODE" ]; then
+  echo "dsh-acp: no node runtime found (the bundle embeds none); install node >= 20" >&2
+  exit 1
+fi
 exec "$NODE" "$DIR/dist/src/bin/dsh-acp-server.js" "$@"
 EOF
 chmod +x "$STAGE/dsh-acp"
