@@ -94,6 +94,23 @@ function postTo(endpoint: string, body: string): Promise<string> {
 }
 
 /**
+ * Whether this request must be answered before notifications for its session
+ * are forwarded. Zed (zed#60199) drops `session/update` notifications that
+ * arrive before the `session/new` (or `session/load`) response — the session
+ * is still "unknown" to it — so the bridge holds notification frames while
+ * such a request is in flight and flushes them after the response line.
+ */
+function holdsNotifications(line: string): boolean {
+  try {
+    const parsed = JSON.parse(line)
+    const method = parsed && typeof parsed === 'object' ? parsed.method : undefined
+    return method === 'session/new' || method === 'session/load'
+  } catch (e) {
+    return false
+  }
+}
+
+/**
  * Attach the bridge loop to the given stdio streams.
  * @param input - readable stream (JSON-RPC request lines).
  * @param output - writable stream (single-line JSON responses and notifications).
@@ -112,8 +129,16 @@ export function attachBridge(
   onClose: () => void = () => process.exit(0),
 ): BridgeHandle {
   const candidates = (Array.isArray(endpoints) ? endpoints : [endpoints]).filter(Boolean)
+  // Multi-candidate mode (the standalone bridge): the endpoint file may point
+  // at a restarted server's new port, so re-resolve it on failover. The
+  // in-process server mode passes a single loopback endpoint and must never
+  // fall out to file/env candidates.
+  const multiCandidate = Array.isArray(endpoints)
   let active = candidates[0] || 'http://127.0.0.1:3080'
   let closed = false
+  /** Notifications held while a session/new or session/load request is in flight. */
+  let holdingNotifications = false
+  const heldNotifications: string[] = []
 
   const write = (text: string): void => {
     if (closed) return
@@ -133,21 +158,27 @@ export function attachBridge(
   /** Run `fn` against the active endpoint, failing over through the others. */
   const withEndpoint = async <T>(fn: (candidate: string) => Promise<T>): Promise<T> => {
     const tried: string[] = []
-    for (const candidate of [active, ...candidates.filter((c) => c !== active)]) {
-      if (tried.includes(candidate)) continue
-      tried.push(candidate)
-      try {
-        const result = await fn(candidate)
-        if (candidate !== active) {
-          note(`switched endpoint to ${candidate}`)
-          active = candidate
+    for (const round of [0, 1]) {
+      // Round 1 re-resolves the endpoint file: a restarted server (or a stale
+      // file) moves to a new port, and a fresh read picks it up automatically.
+      const list = round === 0 || !multiCandidate ? candidates : resolveEndpoints()
+      for (const candidate of [active, ...list.filter((c) => c !== active)]) {
+        if (tried.includes(candidate)) continue
+        tried.push(candidate)
+        try {
+          const result = await fn(candidate)
+          if (candidate !== active) {
+            note(`switched endpoint to ${candidate}`)
+            active = candidate
+          }
+          return result
+        } catch (e) {
+          /* try the next candidate */
         }
-        return result
-      } catch (e) {
-        /* try the next candidate */
       }
+      if (round === 0) note(`no reachable endpoint yet; re-reading endpoint file`)
     }
-    throw new Error(`no reachable endpoint in [${candidates.join(', ')}]`)
+    throw new Error(`no reachable endpoint in [${resolveEndpoints().join(', ')}]`)
   }
 
   const post = (body: string): Promise<string> => withEndpoint((candidate) => postTo(candidate, body))
@@ -173,7 +204,11 @@ export function attachBridge(
             const frame = buf.slice(0, idx)
             buf = buf.slice(idx + 2)
             for (const line of frame.split('\n')) {
-              if (line.startsWith('data: ')) write(line.slice(6))
+              if (line.startsWith('data: ')) {
+                const text = line.slice(6)
+                if (holdingNotifications) heldNotifications.push(text)
+                else write(text)
+              }
             }
           }
         })
@@ -188,11 +223,35 @@ export function attachBridge(
   rl.on('line', async (line) => {
     const trimmed = line.trim()
     if (!trimmed) return
+    // The request id for the error reply (best effort; dropped on malformed JSON).
+    let reqId: unknown = null
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed && typeof parsed === 'object' && 'id' in parsed) reqId = parsed.id
+    } catch (e) {
+      /* not JSON; no id to echo */
+    }
+    // Zed drops notifications for sessions it does not know yet, so hold them
+    // while a session-creating/loading request is in flight (see
+    // holdsNotifications).
+    if (holdsNotifications(trimmed)) holdingNotifications = true
     try {
       const response = await post(trimmed)
       if (response) write(response)
     } catch (e: unknown) {
-      note(`request failed: ${String((e instanceof Error && e.message) || e)}`)
+      const message = String((e instanceof Error && e.message) || e)
+      note(`request failed: ${message}`)
+      // Never leave the client hanging on an unreachable endpoint: answer with
+      // a JSON-RPC error so the editor shows a failure instead of loading.
+      if (reqId !== null) write(JSON.stringify({ jsonrpc: '2.0', id: reqId, error: { code: -32000, message } }))
+    } finally {
+      // The request has settled: forward notifications held while it was in
+      // flight, in order, after the response line.
+      if (holdingNotifications) {
+        holdingNotifications = false
+        for (const held of heldNotifications) write(held)
+        heldNotifications.length = 0
+      }
     }
   })
   rl.on('close', () => close())

@@ -252,8 +252,17 @@ export function makeNeverSignal(): NeverSignal {
 }
 
 /**
- * Build the ACP session-mode state from DSH plan-mode state.
- * @param planActive - whether DSH plan mode is currently active.
+ * Build the ACP session-mode state from the agent-preset roster.
+ *
+ * DSH's own "modes" are its agent presets (the web GUI's Standard / Code /
+ * Minimal / Creator modes): a session's mode is the preset its agent was
+ * composed from, and switching mode re-composes the agent. Plan mode is not
+ * a session mode — it is a per-agent toggle driven through the `/plan` slash
+ * command, exactly like the web GUI's Plan chip.
+ * @param currentModeId - the session's current preset id.
+ * @param presets - the roster rows (`{ id, name?, description? }`); when the
+ *   registry is absent the caller passes an empty list and a single
+ *   `standard` fallback mode is advertised (the gateway's default preset).
  * @returns the ACP SessionModeState.
  */
 export interface SessionModeState {
@@ -261,13 +270,18 @@ export interface SessionModeState {
   availableModes: { id: string; name: string; description: string }[]
 }
 
-export function sessionModeState(planActive: boolean): SessionModeState {
+export function sessionModeState(
+  currentModeId: string,
+  presets: { id: string; name?: string; description?: string }[],
+): SessionModeState {
+  const rows = presets.length > 0 ? presets : [{ id: 'standard' }]
   return {
-    currentModeId: planActive ? 'plan' : 'code',
-    availableModes: [
-      { id: 'code', name: 'Code', description: 'Full tool access for implementation' },
-      { id: 'plan', name: 'Plan', description: 'Design and plan without implementation' },
-    ],
+    currentModeId: rows.some((p) => p.id === currentModeId) ? currentModeId : rows[0].id,
+    availableModes: rows.map((p) => ({
+      id: p.id,
+      name: p.name ?? p.id,
+      description: p.description ?? '',
+    })),
   }
 }
 
@@ -376,10 +390,10 @@ export function buildConfigOptions(input: ConfigOptionsInput): ConfigOption[] {
     {
       id: 'mode',
       name: 'Session Mode',
-      description: 'Controls how the agent requests permission',
+      description: 'The agent preset this session runs (Standard / Code / Minimal / Creator / custom)',
       category: 'mode',
       type: 'select',
-      currentValue: currentModeId || 'code',
+      currentValue: currentModeId,
       options: availableModes.map((m) => ({ value: m.id, name: m.name, description: m.description })),
     },
   ]

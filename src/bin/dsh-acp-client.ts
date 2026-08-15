@@ -14,7 +14,7 @@
  *   init                          initialize
  *   new [cwd]                     session/new (prints sessionId)
  *   prompt <text...>              session/prompt (streams notifications)
- *   mode <code|plan>              session/set_mode
+ *   mode <preset-id>               session/set_mode (modes = agent presets)
  *   set <configId> <value>        session/set_config_option
  *   cancel                        session/cancel (active prompt)
  *   list                          session/list
@@ -244,7 +244,7 @@ async function main() {
           renderResult('session/delete', await rpc.call('session/delete', { sessionId: rest }))
           break
         case 'help':
-          process.stdout.write(`commands: init | new [cwd] | prompt <text> | mode <code|plan> | set <id> <value> | cancel | list | load <id> | delete <id> | quit\n`)
+          process.stdout.write(`commands: init | new [cwd] | prompt <text> | mode <preset-id> | set <id> <value> | cancel | list | load <id> | delete <id> | quit\n`)
           break
         case 'quit':
         case 'exit':

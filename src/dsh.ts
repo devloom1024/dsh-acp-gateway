@@ -73,13 +73,11 @@ export interface ToolsService {
 export interface CommandsService {
   list(agent: DshAgent): { name: string; description?: string; input?: { hint?: string } }[]
   find(agent: DshAgent, name: string): unknown
-  execute(agent: DshAgent, line: string, signal: NeverSignal): Promise<{ result?: { content?: any[] } } | undefined>
-}
-
-/** `planMode` service surface (PlanModeController). */
-export interface PlanModeService {
-  get(agent: DshAgent): { active: boolean; pending?: boolean }
-  set(agent: DshAgent, active: boolean): string
+  execute(
+    agent: DshAgent,
+    line: string,
+    signal: NeverSignal,
+  ): Promise<{ commandId: string; result?: { kind?: string; text?: string; content?: any[] } } | undefined>
 }
 
 /** `approval` service surface. */
@@ -89,8 +87,10 @@ export interface ApprovalService {
 
 /** `agentPresets` service surface. */
 export interface AgentPresetsService {
-  list(): Promise<{ id: string }[]>
+  list(): Promise<{ id: string; name?: string; description?: string }[]>
   mount(agentCtx: any, id: string): Promise<void>
+  /** The deployment's default preset id (settings layer first, then config). */
+  defaultId?: string
 }
 
 /** `sessionQuery` service surface. */

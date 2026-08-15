@@ -1,20 +1,26 @@
 #!/usr/bin/env node
 /**
- * DSH ACP Gateway — one-command isolated ACP server.
+ * DSH ACP Gateway — one-command ACP server.
  *
- * Boots a private DSH instance (its own home, config, persistence, and an
- * OS-assigned loopback port) that exposes the dsh-acp-gateway plugin, and
- * serves the ACP protocol directly over this process's stdio. Nothing in the
- * user's existing DSH deployment is touched:
+ * Boots a private DSH instance that exposes the dsh-acp-gateway plugin and
+ * serves the ACP protocol directly over this process's stdio.
  *
- *   - DSH_HOME → $HOME/.dsh-acp (isolated credentials/settings/sessions)
+ * By default the server shares the user's real deployment home (`~/.dsh`):
+ * agent presets (including locally authored ones like `anchored-standard`),
+ * settings (default model, default preset, permission), sessions, and
+ * credentials are all the same ones the web GUI uses, so every feature works
+ * identically. Set `DSH_ACP_HOME` to isolate (e.g. `~/.dsh-acp`) when a
+ * separate deployment is wanted:
+ *
+ *   - DSH_HOME → $HOME/.dsh (shared; override with DSH_ACP_HOME)
  *   - webServer → 127.0.0.1:0 (OS-assigned random loopback port)
  *
  * The composition is the official `dsh-base` bundle (the same agent stack a
  * `dsh web` profile mounts: LLM runtime, credentials, tools, agent registry,
  * commands, plan mode, ...) plus a loopback-only webServer and the ACP
- * gateway. The model provider is `deepseek-official` (DeepSeek official API);
- * set `DEEPSEEK_API_KEY` (or use `--provider`/`--model` flags).
+ * gateway. The model provider defaults to `opencode-go`; set
+ * `DEEPSEEK_API_KEY` (or use `--provider`/`--model` flags) for
+ * `deepseek-official`.
  *
  * Usage:
  *   dsh-acp-server
@@ -48,8 +54,10 @@ const EMPTY_CONFIG = join(PKG_ROOT, 'examples', 'empty.cordis.yml')
 installFailLoud(NAME)
 loadEnv(NAME)
 
-// Isolated home: never touch the user's real ~/.dsh.
-const acpHome = process.env.DSH_ACP_HOME || join(homedir(), '.dsh-acp')
+// Home: share the user's real deployment by default so presets, settings,
+// sessions, and credentials are the same ones the web GUI uses. DSH_ACP_HOME
+// opts back into a fully isolated deployment.
+const acpHome = process.env.DSH_ACP_HOME || join(homedir(), '.dsh')
 mkdirSync(acpHome, { recursive: true })
 process.env.DSH_HOME = acpHome
 if (!process.env.DSH_ACP_HOME) process.env.DSH_ACP_HOME = acpHome
@@ -107,7 +115,9 @@ const basePatchPath = join(baseDir, baseManifest.dsh?.bundle?.patch ?? 'cordis.p
 function shippedPresetRoot() {
   try {
     const appBootDir = resolvePackageDir('@deepseek-ai/dsh-app-boot')
-    const candidate = join(dirname(dirname(appBootDir)), 'config', 'agent-presets')
+    // dsh-app-boot sits at <app>/node_modules/@deepseek-ai/dsh-app-boot: ascend
+    // three levels to the dsh app root (the same climb dshInstallAnchor uses).
+    const candidate = join(appBootDir, '..', '..', '..', 'config', 'agent-presets')
     return readFileSync(join(candidate, 'standard', 'preset.yml'), 'utf8') ? candidate : null
   } catch (e) {
     return null
@@ -116,19 +126,22 @@ function shippedPresetRoot() {
 
 // Boot with the empty composition patched by: the official dsh-base bundle
 // (unchanged), then our overlays (HMR off, loopback webServer, agent presets
-// root, provider route for the isolated home, and the ACP gateway). Stdout
-// stays pure for ACP JSON-RPC.
+// root, provider route, and the ACP gateway). Stdout stays pure for ACP
+// JSON-RPC.
 const presetRoot = shippedPresetRoot()
 const provider = values.provider
-// The isolated home has no settings document, so a pi-ai provider route is
-// declared directly on the adapter row. `deepseek-official` is the dedicated
-// llm-deepseek adapter (DEEPSEEK_API_KEY) and needs no pi-ai route.
+// When the home has no settings document (isolated `DSH_ACP_HOME`), a pi-ai
+// provider route is declared directly on the adapter row. With a shared home
+// the deployment's own llm-pi-ai settings layer already carries the routes.
+// `deepseek-official` is the dedicated llm-deepseek adapter (DEEPSEEK_API_KEY)
+// and needs no pi-ai route.
 const apiKeyEnv = provider === 'deepseek-official' ? 'DEEPSEEK_API_KEY' : `${provider.replace(/-/g, '_').toUpperCase()}_API_KEY`
 const patches = [
   ...loadOverlayPatches(NAME, basePatchPath),
   { id: 'hmr', disabled: true },
-  // The isolated home has no settings document, so the default model row
-  // (bundle default: deepseek-official) must match the requested provider.
+  // The default-model row only seeds the base (bundle default: deepseek-official)
+  // when the home has no settings document; a shared home's `agent-default-model`
+  // settings section overrides it live.
   { id: 'agent-default-model', config: { provider, model: values.model } },
   ...(provider === 'deepseek-official'
     ? []
@@ -136,8 +149,13 @@ const patches = [
   {
     insert: [
       { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver', config: { host: '127.0.0.1', port: 0 } },
+      // The shipped preset root only; the service appends the home's own
+      // `.agent-presets` user root automatically, so a shared home sees the
+      // same roster (and default) as the web GUI. `default` is the row's base
+      // (the web profile declares `standard`); a shared home's settings layer
+      // (`agent-presets.default`) overrides it live.
       ...(presetRoot
-        ? [{ id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets', config: { roots: [{ path: presetRoot, trust: 'system' }] } }]
+        ? [{ id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'standard', roots: [{ path: presetRoot, trust: 'system' }] } }]
         : []),
       {
         id: 'acp-gateway',
@@ -145,7 +163,7 @@ const patches = [
         config: {
           provider,
           model: values.model,
-          stdioScriptPath: join(acpHome, 'dsh-acp-agent.js'),
+          stdioScriptPath: join(acpHome, 'acp', 'dsh-acp-agent.js'),
         },
       },
     ],
@@ -154,8 +172,9 @@ const patches = [
 
 // Bare package resolution: the official dsh CLI keeps one flat symlink
 // directory per home ($DSH_HOME/profiles/node_modules) that mirrors every
-// package the dsh app and its bundles depend on. Recreate it inside the
-// isolated home and hand it to the loader as the bare-module base, exactly
+// package the dsh app and its bundles depend on. Maintain it in the target
+// home (idempotent — with a shared home the existing web-profile directory
+// is reused) and hand it to the loader as the bare-module base, exactly
 // like `dsh --profile web` does.
 const anchor = dshInstallAnchor()
 if (anchor === null) {

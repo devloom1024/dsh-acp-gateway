@@ -60,11 +60,22 @@ test('makeNeverSignal provides the AbortSignal surface without aborting', () => 
   assert.equal(called, false)
 })
 
-test('sessionModeState builds code/plan modes', () => {
-  const state = sessionModeState(false)
-  assert.equal(state.currentModeId, 'code')
-  assert.deepEqual(state.availableModes.map((m) => m.id), ['code', 'plan'])
-  assert.equal(sessionModeState(true).currentModeId, 'plan')
+test('sessionModeState builds preset modes', () => {
+  const presets = [
+    { id: 'anchored-standard', name: 'Anchored Standard (experimental)', description: 'bootstrap' },
+    { id: 'standard', name: 'Standard mode' },
+    { id: 'minimal', name: 'Minimal mode' },
+  ]
+  const state = sessionModeState('anchored-standard', presets)
+  assert.equal(state.currentModeId, 'anchored-standard')
+  assert.deepEqual(state.availableModes.map((m) => m.id), ['anchored-standard', 'standard', 'minimal'])
+  assert.equal(state.availableModes[0].name, 'Anchored Standard (experimental)')
+  // An unknown current id falls back to the first advertised mode.
+  assert.equal(sessionModeState('nope', presets).currentModeId, 'anchored-standard')
+  // No registry: single `standard` fallback mode.
+  const fallback = sessionModeState('standard', [])
+  assert.equal(fallback.currentModeId, 'standard')
+  assert.deepEqual(fallback.availableModes.map((m) => m.id), ['standard'])
 })
 
 test('buildBridgeScript embeds the endpoint and generates a parseable script', () => {

@@ -25,11 +25,11 @@ Compared to the upstream automation-only [`@deepseek-ai/dsh-acp`](https://github
 | ✅ `session/list` / `session/load` / `session/delete` | resume persisted sessions with history replay |
 | ✅ `usage_update` | token usage from `assistant/message` |
 | ✅ Image / audio prompt content | image → DSH attachment; audio → textual reference |
-| ✅ Slash commands | `available_commands_update` + `/cmd` execution |
-| ✅ Session modes | `code` / `plan` (maps DSH plan mode), `session/set_mode`, `current_mode_update` |
+| ✅ Slash commands | `available_commands_update` + `/cmd` execution (incl. `/plan`, `/plan off` — the same channel the web GUI's Plan chip uses) |
+| ✅ Session modes | the **agent presets** (the web GUI's modes: Standard / Code(PTC) / Minimal / Creator / your custom presets), `session/set_mode` re-composes the agent, `current_mode_update` |
 | ✅ `user_message_chunk` | echo accepted prompts |
 | ✅ Embedded resource content | `resource` blocks expand into prompt text |
-| ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (code/plan), `model` (`provider/model`), `thought_level`, `permission` (read-only / workspace-write / danger-full-access), and `preset` (standard / code(PTC) / minimal / creation); `session/set_config_option` returns the full config state; `config_option_update` notifications |
+| ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (the agent presets — same values as `session/set_mode`), `model` (`provider/model`), `thought_level`, `permission` (read-only / workspace-write / danger-full-access); `session/set_config_option` returns the full config state; `config_option_update` notifications |
 | ✅ Permission approval flow | workspace-write asks the client through `session/request_permission` for mutating tools (edit/delete/move/execute); read-only and full-access never ask (sandbox gates the former). Approval policy tracks the permission level |
 | ✅ Elicitation | DSH `ask_user_question` surfaces as an ACP `elicitation/create` form; answers feed back as the tool result |
 | ✅ Thinking stream | `agent_thought_chunk` from DSH reasoning chunks |
@@ -105,12 +105,10 @@ On start the plugin writes the stdio bridge to `~/.dsh/acp/dsh-acp-agent.js` (en
 
 The bridge resolves the DSH endpoint from, in order: `DSH_ACP_URL` env var → `~/.dsh/acp/endpoint` file → `http://127.0.0.1:3080`.
 
-## One-command isolated server
+## One-command server
 
-Prefer a self-contained ACP agent (own home, config, credentials, sessions;
-nothing in your existing DSH deployment is touched)? Launch the embedded
-server directly — it boots an isolated DSH instance (official `dsh-base`
-agent stack on a loopback port) and serves ACP over its own stdio:
+Launch the embedded server directly — it boots a full DSH instance (official
+`dsh-base` agent stack on a loopback port) and serves ACP over its own stdio:
 
 ```bash
 npx dsh-acp-server            # or: node bin/dsh-acp-server.js
@@ -118,8 +116,16 @@ npx dsh-acp-server            # or: node bin/dsh-acp-server.js
 # Set the provider's API key env var, e.g. OPENCODE_GO_API_KEY or DEEPSEEK_API_KEY
 ```
 
-Or reuse the official CLI and attach the gateway to an isolated profile
-(web UI + full agent stack, still isolated via `DSH_HOME`):
+By default the server **shares your deployment home (`~/.dsh`)**: agent
+presets (including locally authored ones), settings (default model, default
+preset, permission), sessions, and credentials are exactly the ones the web
+GUI uses, so every feature behaves identically. Set `DSH_ACP_HOME` (e.g.
+`~/.dsh-acp`) for a fully isolated instance that touches nothing in the real
+deployment — the preset roster then contains only the shipped presets plus
+whatever you author inside the isolated home's `.agent-presets`.
+
+You can also reuse the official CLI and attach the gateway to an isolated
+profile (web UI + full agent stack, still isolated via `DSH_HOME`):
 
 ```bash
 DSH_HOME=~/.dsh-acp npx @deepseek-ai/dsh --profile web \
@@ -142,8 +148,8 @@ new /tmp
 prompt 运行 pwd 并报告' | node bin/dsh-acp-client.js   # scripted
 ```
 
-Commands: `init`, `new [cwd]`, `prompt <text>`, `mode <code|plan>`,
-`set <configId> <value>` (provider/model/thought_level/permission),
+Commands: `init`, `new [cwd]`, `prompt <text>`, `mode <preset-id>`,
+`set <configId> <value>` (mode/provider/model/thought_level/permission),
 `cancel`, `list`, `load <id>`, `delete <id>`.
 
 ## Development
@@ -171,7 +177,7 @@ Implemented methods (Agent side): `initialize`, `authenticate` (no-op), `session
 
 Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`, `config_option_update`.
 
-Session config options: `mode` (code/plan), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access), `preset` (standard / code / minimal / creation — the web's agent modes). Changing `model`, `thought_level`, or `preset` rebuilds the live agent from its persisted session; `mode` switches DSH plan mode; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). Both `configOptions` and the legacy `modes` field are returned (transition period per the spec).
+Session config options: `mode` (the agent presets — standard / code(PTC) / minimal / creation / your custom presets; identical values to `session/set_mode`), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). Changing `mode`, `model`, or `thought_level` rebuilds the live agent from its persisted session; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). Plan mode is **not** a session mode: it is toggled through the `/plan` and `/plan off` slash commands, exactly like the web GUI's Plan chip. Both `configOptions` and the `modes` field are returned (transition period per the spec).
 
 Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). DSH `ask_user_question` maps to an ACP `elicitation/create` form.
 

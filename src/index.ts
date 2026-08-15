@@ -5,8 +5,8 @@
  * Unlike the upstream `@deepseek-ai/dsh-acp` automation-only bridge, this
  * plugin adds: token-level streaming, tool-call notifications, session
  * list/load/delete, usage updates, image/audio prompt content, slash
- * commands, session modes, and full tool access (via the `standard` agent
- * preset).
+ * commands, session modes (the agent presets, exactly the web GUI's modes),
+ * and full tool access (via the `standard` agent preset).
  *
  * Transport is stdio only: a client (Zed, VS Code ACP, ...) launches the
  * bridge script (`bin/dsh-acp-agent.js` or the generated
@@ -24,7 +24,6 @@ import type {
   DefaultModelService,
   ToolsService,
   CommandsService,
-  PlanModeService,
   ApprovalService,
   AgentPresetsService,
   SessionQueryService,
@@ -56,8 +55,8 @@ export const name = 'acp-gateway'
 /** Hard dependencies: the agent factory and timers. Everything else is optional. */
 export const inject = ['agents', 'timer']
 
-/** Session mode ids this agent advertises. */
-const MODE_IDS = ['code', 'plan']
+/** Session mode ids this agent advertises: the agent-preset roster. */
+const FALLBACK_MODE_ID = 'standard'
 
 /**
  * Optional gateway configuration.
@@ -95,7 +94,6 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const commandsNow = (): CommandsService | undefined => ctx.get('commands')
   // Services that can become available after apply (the official web profile
   // activates rows in service order) are read lazily at call time.
-  const planModeNow = (): PlanModeService | undefined => ctx.get('planMode')
   const defaultModelNow = (): DefaultModelService | undefined => ctx.get('agentDefaultModel')
   const llmNow = (): LlmService | undefined => ctx.get('llm')
   const approvalNow = (): ApprovalService | undefined => ctx.get('approval')
@@ -180,19 +178,19 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const agentSetup = async (agentCtx: any): Promise<void> => {
     try {
       // Full tool access + system prompt, same as the Web GUI. The preset is
-      // the session's selected one (standard by default); when no preset
-      // registry is configured, the agent keeps whatever the composition
-      // mounted at the agent scope.
+      // the session's selected one (the deployment default by default); when
+      // no preset registry is configured, the agent keeps whatever the
+      // composition mounted at the agent scope.
       const agentPresets = agentPresetsNow()
       if (agentPresets) {
         try {
           const cfg = setupSessionId ? sessionConfigs.get(setupSessionId) : undefined
-          const presetId = (cfg && cfg.preset) || 'standard'
+          const presetId = (cfg && cfg.preset) || defaultPresetId()
           const presets = await agentPresets.list()
           if (presets.some((p) => p.id === presetId)) {
             await agentPresets.mount(agentCtx, presetId)
-          } else if (presets.some((p) => p.id === 'standard')) {
-            await agentPresets.mount(agentCtx, 'standard')
+          } else if (presets.some((p) => p.id === FALLBACK_MODE_ID)) {
+            await agentPresets.mount(agentCtx, FALLBACK_MODE_ID)
           }
         } catch (e) {
           ctx.logger.warn(`acp-gateway: preset mount failed: ${String((e instanceof Error && e.message) || e)}`)
@@ -362,35 +360,38 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     }
   }
   /**
-   * Plan-mode controller for one agent: the `standard` preset mounts it in
-   * the agent plane (isolate realm), so read it from the agent's own context
-   * first, falling back to the host plane (dynamic harness compositions).
+   * The deployment's default preset id: the agent-presets service's default
+   * (settings layer first — the web GUI's "default" — then row config),
+   * falling back to `standard`.
    */
-  const planModeFor = (agent: DshAgent): PlanModeService | undefined => {
+  const defaultPresetId = (): string => {
+    const ap = agentPresetsNow()
+    if (!ap) return FALLBACK_MODE_ID
     try {
-      if (agent && agent.ctx) {
-        const pm = agent.ctx.get('planMode')
-        if (pm) return pm
-      }
+      return ap.defaultId || FALLBACK_MODE_ID
     } catch (e) {
-      /* fall through */
+      return FALLBACK_MODE_ID
     }
-    return planModeNow()
   }
-  const modeStateFor = (agent: DshAgent): SessionModeState => {
-    let planActive = false
-    const planMode = planModeFor(agent)
-    if (planMode) {
-      try {
-        // `pending` is the not-yet-committed selection (committed at the next
-        // step start); both count as the effective mode for the client.
-        const state = planMode.get(agent)
-        planActive = !!(state && (state.active || state.pending))
-      } catch (e) {
-        /* keep code */
-      }
+  /** The agent-preset roster, or an empty list when no registry is mounted. */
+  const presetList = async (): Promise<{ id: string; name?: string; description?: string }[]> => {
+    const ap = agentPresetsNow()
+    if (!ap) return []
+    try {
+      return await ap.list()
+    } catch (e) {
+      return []
     }
-    return sessionModeState(planActive)
+  }
+  /**
+   * The ACP session-mode state for one ACP session: modes ARE the agent
+   * presets (same vocabulary the web GUI uses for its modes), and the current
+   * mode is the preset this session's agent runs. Plan on/off is not a mode —
+   * it is the `/plan` slash command, exactly like the web GUI's Plan chip.
+   */
+  const sessionModesFor = async (acpSessionId: string): Promise<SessionModeState> => {
+    const cfg = sessionConfigs.get(acpSessionId)
+    return sessionModeState((cfg && cfg.preset) || defaultPresetId(), await presetList())
   }
 
   // ---- state ------------------------------------------------------------
@@ -588,8 +589,10 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
         break
       }
       case 'plan/mode': {
-        const active = event.data && event.data.active
-        notifyUpdate(acpSessionId, { sessionUpdate: 'current_mode_update', modeId: active ? 'plan' : 'code' })
+        // Plan mode is not a session mode (modes are the agent presets); it is
+        // toggled through the `/plan` slash command. Refresh the config options
+        // so clients that derive state from them stay consistent, but do not
+        // emit a `current_mode_update` with a mode id that no longer exists.
         void (async () => {
           try {
             const opts = await buildConfigOptionsFor(acpSessionId)
@@ -656,11 +659,17 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     if (!name || !commands.find(agent, name)) return null
     const execution = await commands.execute(agent, line, makeNeverSignal())
     if (!execution) return null
-    const blocks = execution.result && execution.result.content
-      ? execution.result.content
-      : [{ type: 'text', text: `Command /${name} completed` }]
-    const textOut = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
-    return { stopReason: 'end_turn', output: textOut }
+    // Handlers return `{ kind, text }` (e.g. `/plan` → "Plan mode on."); a
+    // content-block result is also accepted for compatibility.
+    const result = execution.result as { content?: any[]; text?: string } | undefined
+    const blocks = result && Array.isArray(result.content) ? result.content : []
+    const textOut = [
+      ...blocks.filter((b) => b.type === 'text').map((b) => b.text),
+      ...(result && typeof result.text === 'string' && result.text ? [result.text] : []),
+    ]
+      .join('\n')
+      .trim()
+    return { stopReason: 'end_turn', output: textOut || `Command /${name} completed` }
   }
 
   // ---- prompt content conversion (text/image/audio/resource) ---------------
@@ -777,20 +786,10 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const modelId = (cfg && cfg.modelId) || (sel && sel.model) || null
     const effort = (cfg && cfg.reasoningEffort) || (sel && sel.reasoningEffort) || null
     const handle = handles.get(acpSessionId)
-    const modeState = handle ? modeStateFor(handle.agent) : sessionModeState(false)
     const modelOptions = await allModelOptions()
     const handleAgent = handle ? handle.agent : null
     const sandboxMode = handleAgent ? sandboxModeFor(handleAgent) : null
-    const presetOptions: { value: string; name: string }[] = []
-    const ap = agentPresetsNow()
-    if (ap) {
-      try {
-        for (const p of await ap.list()) presetOptions.push({ value: p.id, name: p.id })
-      } catch (e) {
-        /* no presets */
-      }
-    }
-    const presetId = (cfg && cfg.preset) || 'standard'
+    const modeState = await sessionModesFor(acpSessionId)
     const options = buildConfigOptions({
       currentModeId: modeState.currentModeId,
       availableModes: modeState.availableModes,
@@ -799,9 +798,6 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       modelOptions,
       sandboxMode,
     })
-    if (presetOptions.length > 0) {
-      options.push({ id: 'preset', name: 'Agent Preset', description: 'Agent preset (standard / PTC / minimal / creation)', category: 'mode', type: 'select', currentValue: presetId, options: presetOptions })
-    }
     return options
   }
   /** Whether the live agent was built with the session's current desired config. */
@@ -812,12 +808,12 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const desiredProvider = cfg.providerId || sel.provider || null
     const desiredModel = cfg.modelId || sel.model || null
     const desiredEffort = cfg.reasoningEffort || sel.reasoningEffort || null
-    const desiredPreset = cfg.preset || 'standard'
+    const desiredPreset = cfg.preset || defaultPresetId()
     return (
       desiredProvider !== (applied.provider || null) ||
       desiredModel !== (applied.model || null) ||
       desiredEffort !== (applied.reasoningEffort || null) ||
-      desiredPreset !== (applied.preset || 'standard')
+      desiredPreset !== (applied.preset || defaultPresetId())
     )
   }
   const recordApplied = (acpSessionId: string): void => {
@@ -827,7 +823,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       provider: opts.provider || null,
       model: opts.model || null,
       reasoningEffort: opts.reasoningEffort || null,
-      preset: (cfg && cfg.preset) || 'standard',
+      preset: (cfg && cfg.preset) || defaultPresetId(),
     })
   }
   /**
@@ -906,7 +902,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
               promptCapabilities: { image: true, audio: true, embeddedContext: true },
               sessionCapabilities: { list: {}, delete: {} },
             },
-            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.9.0' },
+            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.10.0' },
             authMethods: [],
           })
         }
@@ -925,7 +921,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           advertiseCommands(acpSessionId, handle.agent)
           recordApplied(acpSessionId)
           const newOptions = await buildConfigOptionsFor(acpSessionId)
-          return respond({ sessionId: acpSessionId, modes: modeStateFor(handle.agent), configOptions: newOptions })
+          return respond({ sessionId: acpSessionId, modes: await sessionModesFor(acpSessionId), configOptions: newOptions })
         }
         case 'session/load': {
           const acpSessionId = String(params.sessionId || '')
@@ -933,7 +929,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           const existingHandle = handles.get(acpSessionId)
           if (existingHandle) {
             const opts = await buildConfigOptionsFor(acpSessionId)
-            return respond({ modes: modeStateFor(existingHandle.agent), configOptions: opts })
+            return respond({ modes: await sessionModesFor(acpSessionId), configOptions: opts })
           }
           try {
             const handle = await agents.resume({ resumeSessionId: acpSessionId as any, agentOptions: agentOptionsFor(acpSessionId), setup: agentSetup })
@@ -943,7 +939,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             advertiseCommands(acpSessionId, handle.agent)
             recordApplied(acpSessionId)
             const opts = await buildConfigOptionsFor(acpSessionId)
-            return respond({ modes: modeStateFor(handle.agent), configOptions: opts })
+            return respond({ modes: await sessionModesFor(acpSessionId), configOptions: opts })
           } catch (e) {
             return fail(-32002, `session not found: ${acpSessionId}`)
           }
@@ -991,20 +987,19 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           const handle = handles.get(params.sessionId)
           if (!handle) return fail(-32002, `session not found: ${String(params.sessionId)}`)
           const modeId = String(params.modeId || '')
-          if (!MODE_IDS.includes(modeId)) return fail(-32602, `unknown mode: ${modeId}`)
-          const planMode = planModeFor(handle.agent)
-          if (planMode) {
-            try {
-              planMode.set(handle.agent, modeId === 'plan')
-            } catch (e) {
-              return fail(-32603, 'mode switch failed')
-            }
-          }
-          notifyUpdate(String(params.sessionId), { sessionUpdate: 'current_mode_update', modeId })
+          // Modes are the agent presets; switching mode re-composes the agent
+          // from the selected preset (applied lazily at the next prompt).
+          const ids = (await presetList()).map((p) => p.id)
+          if (ids.length === 0) ids.push(FALLBACK_MODE_ID)
+          if (!ids.includes(modeId)) return fail(-32602, `unknown mode: ${modeId}`)
+          const acpSessionId = String(params.sessionId)
+          const cfg = sessionConfigs.get(acpSessionId) || {}
+          sessionConfigs.set(acpSessionId, { ...cfg, preset: modeId })
+          notifyUpdate(acpSessionId, { sessionUpdate: 'current_mode_update', modeId })
           void (async () => {
             try {
-              const opts = await buildConfigOptionsFor(String(params.sessionId))
-              notifyUpdate(String(params.sessionId), { sessionUpdate: 'config_option_update', configOptions: opts })
+              const opts = await buildConfigOptionsFor(acpSessionId)
+              notifyUpdate(acpSessionId, { sessionUpdate: 'config_option_update', configOptions: opts })
             } catch (e) {
               /* best effort */
             }
@@ -1019,15 +1014,13 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           const value = params.value
           if (configId === 'mode') {
             const modeId = String(value)
-            if (!MODE_IDS.includes(modeId)) return fail(-32602, `unknown mode: ${modeId}`)
-            const planMode = planModeFor(handle.agent)
-            if (planMode) {
-              try {
-                planMode.set(handle.agent, modeId === 'plan')
-              } catch (e) {
-                return fail(-32603, 'mode switch failed')
-              }
-            }
+            // Modes are the agent presets; switching mode re-composes the
+            // agent from the selected preset (applied lazily at next prompt).
+            const ids = (await presetList()).map((p) => p.id)
+            if (ids.length === 0) ids.push(FALLBACK_MODE_ID)
+            if (!ids.includes(modeId)) return fail(-32602, `unknown mode: ${modeId}`)
+            const cfg = sessionConfigs.get(acpSessionId) || {}
+            sessionConfigs.set(acpSessionId, { ...cfg, preset: modeId })
             notifyUpdate(acpSessionId, { sessionUpdate: 'current_mode_update', modeId })
           } else if (configId === 'model') {
             const valueStr = String(value)
@@ -1073,18 +1066,15 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
               return fail(-32603, 'permission switch failed')
             }
           } else if (configId === 'preset') {
-            const presets = []
-            const ap = agentPresetsNow()
-            if (ap) {
-              try {
-                for (const p of await ap.list()) presets.push(p.id)
-              } catch (e) {
-                /* no presets */
-              }
-            }
-            if (!presets.includes(String(value))) return fail(-32602, `unknown preset: ${String(value)}`)
+            // Compatibility alias: `preset` was folded into `mode` (modes ARE
+            // the presets). Accept the same values and record them as the
+            // session's preset.
+            const ids = (await presetList()).map((p) => p.id)
+            if (ids.length === 0) ids.push(FALLBACK_MODE_ID)
+            if (!ids.includes(String(value))) return fail(-32602, `unknown preset: ${String(value)}`)
             const cfg = sessionConfigs.get(acpSessionId) || {}
             sessionConfigs.set(acpSessionId, { ...cfg, preset: String(value) })
+            notifyUpdate(acpSessionId, { sessionUpdate: 'current_mode_update', modeId: String(value) })
           } else {
             return fail(-32602, `unknown config option: ${configId}`)
           }
@@ -1130,15 +1120,24 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             }
             handles.delete(acpSessionId)
             inflightPrompts.delete(params.sessionId)
-            const shellDel = shellNow2()
-            if (shellDel) {
-              try {
-                const dir = String(params.sessionId).replace(/[^a-zA-Z0-9_-]/g, '_')
-                const spec = shellDel.resolve({ command: `rm -rf "$HOME/.dsh/sessions"/*/"${dir}"` })
-                await shellDel.run(spec)
-              } catch (e) {
-                /* ignore */
+            // Remove the persisted session directory with direct node:fs: the
+            // `shell` service is gated by the sandbox policy (workspaceRoot),
+            // which would silently refuse an rm outside the workspace.
+            try {
+              const { readdirSync, rmSync } = await import('node:fs')
+              const { join } = await import('node:path')
+              const { homedir } = await import('node:os')
+              const sessionsRoot = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'sessions')
+              const dir = String(params.sessionId).replace(/[^a-zA-Z0-9_-]/g, '_')
+              for (const cwdDir of readdirSync(sessionsRoot)) {
+                try {
+                  rmSync(join(sessionsRoot, cwdDir, dir), { recursive: true, force: true })
+                } catch (e) {
+                  /* per-dir best effort */
+                }
               }
+            } catch (e) {
+              /* no sessions store */
             }
           }
           return respond({})
@@ -1316,7 +1315,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             record.steps.push({ request: request.method, id: request.id, response })
             return response
           }
-          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.9.0' } } })
+          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.10.0' } } })
           const cwd = (sandboxPolicyNow() && sandboxPolicyNow()!.workspaceRoot) || '.'
           const newRes = await push({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } })
           const sessionId = newRes && newRes.result ? newRes.result.sessionId : null
