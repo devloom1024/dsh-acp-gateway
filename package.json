@@ -39,7 +39,9 @@
     "pack-offline": "bash scripts/package-offline.sh"
   },
   "dependencies": {
-    "@deepseek-ai/dsh": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-app-boot": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
   },
   "keywords": [
     "acp",
