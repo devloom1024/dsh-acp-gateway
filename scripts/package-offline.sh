@@ -32,7 +32,7 @@ OUT_DIR="${1:-$ROOT/dist-offline}"
 EMBED_NODE=0
 if [ "${2:-}" = "--embed-node" ]; then EMBED_NODE=1; fi
 NAME="dsh-acp-gateway-$(node -p "require('$ROOT/package.json').version")"
-STAGE="$(mktemp -d -t dsh-acp-offline)"
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/dsh-acp-offline.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "== assembling $NAME (embed-node=$EMBED_NODE)"
