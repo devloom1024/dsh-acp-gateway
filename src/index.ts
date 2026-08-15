@@ -289,6 +289,19 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             },
             async execute(args: any, exec: any) {
               const items: any[] = Array.isArray(args && args.questions) ? args.questions : []
+              // Capability negotiation: without clientCapabilities.elicitation the
+              // client would not answer elicitation/create — fall back to a plain
+              // text question so the agent can still interact.
+              const supportsElicitation = !!(clientCapabilities && clientCapabilities.elicitation)
+              if (!supportsElicitation) {
+                return {
+                  answers: items.map((q: any) => ({
+                    id: q.id,
+                    selected: [],
+                    custom: '[ACP client does not support elicitation forms; ask the user directly in your reply]',
+                  })),
+                }
+              }
               const properties: Record<string, unknown> = {}
               const required: string[] = []
               for (const q of items) {
@@ -381,6 +394,8 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const announcedToolCalls = new Set<string>()
   /** Agent -> Client JSON-RPC requests awaiting a response (permission, elicitation). */
   const pendingClientRequests = new Map<number, (resp: any) => void>()
+  /** Client capabilities negotiated at initialize (elicitation support, ...). */
+  let clientCapabilities: any = {}
   let clientRequestSeq = 1
   const toolCallArgs = new Map<string, { name: string; arguments: any }>() // callId -> call facts (for diff reconstruction)
   const newSessionId = () => `sess_acp_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`
@@ -875,6 +890,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     try {
       switch (method) {
         case 'initialize': {
+          clientCapabilities = (params && params.clientCapabilities) || {}
           return respond({
             protocolVersion: 1,
             agentCapabilities: {
