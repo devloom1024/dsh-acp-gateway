@@ -221,10 +221,11 @@ isolated instance.
 ACP session modes are the **agent presets** — the same "modes" the web GUI
 offers (Standard / Code / Minimal / Creator, plus your custom presets). The
 current mode follows the deployment default (`agent-presets.default` in
-settings); `session/set_mode` or the `mode` config option switches the preset,
-re-composing the agent at the next prompt. Plan mode is **not** a mode: it is
-toggled through the `/plan` and `/plan off` slash commands, exactly like the
-web GUI's Plan chip.
+settings); `session/set_mode` or the `mode` config option switches the preset:
+a session that has not started yet is recomposed in place (and the switch is
+recorded in its log), a started session re-composes at the next prompt. Plan
+mode is **not** a mode: it is toggled through the `/plan` and `/plan off`
+slash commands, exactly like the web GUI's Plan chip.
 
 ### Test client
 
@@ -246,7 +247,7 @@ Implemented methods (Agent side): `initialize`, `authenticate` (no-op), `session
 
 Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`, `config_option_update`.
 
-Session config options: `mode` (the agent presets — standard / code(PTC) / minimal / creation / your custom presets), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). Changing `mode`, `model`, or `thought_level` rebuilds the live agent from its persisted session; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). Both `configOptions` and the `modes` field are returned (transition period per the spec).
+Session config options: `mode` (the agent presets — standard / code(PTC) / minimal / creation / your custom presets), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). `model` and `thought_level` route through the per-agent request waterfall (like the web GUI's model selector) and take effect on the next prompt without disposing the session; `mode` recomposes a not-yet-started session immediately and re-composes a started one at the next prompt; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). `configOptions` report the session's **actual** current state — the client's pending choice, else the session's own logged request header / recorded preset / sandbox policy resolution — so a session loaded after a server restart shows the config it really runs, not the ambient default. Both `configOptions` and the `modes` field are returned (transition period per the spec).
 
 Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). DSH `ask_user_question` maps to an ACP `elicitation/create` form.
 

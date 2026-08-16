@@ -11,6 +11,7 @@ import {
   toolKind,
   makeNeverSignal,
   sessionModeState,
+  buildConfigOptions,
 } from '../src/codec.js'
 import { buildBridgeScript } from '../src/codec.js'
 
@@ -76,6 +77,41 @@ test('sessionModeState builds preset modes', () => {
   const fallback = sessionModeState('standard', [])
   assert.equal(fallback.currentModeId, 'standard')
   assert.deepEqual(fallback.availableModes.map((m) => m.id), ['standard'])
+})
+
+test('buildConfigOptions carries the actual current state into every option', () => {
+  const modes = [
+    { id: 'standard', name: 'Standard mode', description: '' },
+    { id: 'minimal', name: 'Minimal mode', description: '' },
+  ]
+  const options = buildConfigOptions({
+    currentModeId: 'minimal',
+    availableModes: modes,
+    modelId: 'opencode-go/deepseek-v4-flash',
+    reasoningEffort: 'high',
+    modelOptions: [{ value: 'opencode-go/deepseek-v4-flash', name: 'deepseek-v4-flash' }],
+    sandboxMode: 'workspace-write',
+  })
+  assert.deepEqual(
+    options.map((o) => o.id),
+    ['mode', 'model', 'thought_level', 'permission'],
+  )
+  const mode = options.find((o) => o.id === 'mode')!
+  assert.equal(mode.currentValue, 'minimal')
+  assert.deepEqual(mode.options!.map((o) => o.value), ['standard', 'minimal'])
+  const model = options.find((o) => o.id === 'model')!
+  assert.equal(model.currentValue, 'opencode-go/deepseek-v4-flash')
+  const effort = options.find((o) => o.id === 'thought_level')!
+  assert.equal(effort.currentValue, 'high')
+  assert.deepEqual(effort.options!.map((o) => o.value), ['minimal', 'low', 'medium', 'high', 'max'])
+  const permission = options.find((o) => o.id === 'permission')!
+  assert.equal(permission.currentValue, 'workspace-write')
+  // A session without a model route or effort exposes only the mode option.
+  const bare = buildConfigOptions({ currentModeId: 'standard', availableModes: modes })
+  assert.deepEqual(
+    bare.map((o) => o.id),
+    ['mode'],
+  )
 })
 
 test('buildBridgeScript embeds the endpoint and generates a parseable script', () => {

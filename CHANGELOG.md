@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.10.1] - 2026-08-16
+
+### Fixed
+- Session config options now actually apply. `mode`/`preset` switches
+  recompose a not-yet-started session in place and record the switch in its
+  log (exactly like the web GUI), and re-compose a started session at the
+  next prompt; `model` and `thought_level` route through the per-agent
+  `agent/request` waterfall — the web GUI's own model-selection mechanism —
+  and take effect on the next prompt without disposing the session. Before:
+  the chosen preset was never mounted (the setup hook read a session scratch
+  value that was never set), and the reasoning effort passed in `agentOptions`
+  was silently dropped by the agent loop, which only reads provider/model
+  from options.
+- `configOptions` and `modes` now report the session's ACTUAL current state
+  instead of the ambient default: the client's pending choice, else the
+  session's own logged `request/header` (model/effort), its recorded preset
+  (`agent-preset/selected`, else the creation header), and the sandbox
+  policy's full resolution (permission). A session loaded after a server
+  restart shows the config it really runs under.
+- The composed preset is persisted in the session creation header
+  (`meta.agentPreset`), so a restarted server resumes every session under its
+  own preset instead of the deployment default.
+- Config-option rebuilds no longer loop: `needsRebuild` tracks the preset
+  only, and the applied preset is recorded from the session itself.
+- `reasoning-delta` chunks stream as `agent_thought_chunk` alongside the
+  legacy `reasoning`/`thinking` chunk types.
+
+### Changed
+- The stdio bridge and the endpoint file honor `$DSH_ACP_HOME`/`$DSH_HOME`
+  for the isolated-instance convention (endpoint resolution and write path).
+- Vendor anchor regenerated from the pruned dependency closure.
+
 ## [3.10.0] - 2026-08-15
 
 ### Added

@@ -15,6 +15,10 @@ export interface DshSession {
   readonly log: any[]
   readonly events: any[]
   append(type: string, data: any, opts?: any): any
+  /** Durable creation metadata; `agentPreset` names the preset the session started under. */
+  readonly header?: { cwd?: string; agentPreset?: string }
+  /** The latest logged `request/header` fold (actual provider/model/effort), if any. */
+  requestHeader?(): { config?: { provider?: string; model?: string; reasoningEffort?: string } } | undefined
 }
 
 /** A live DSH agent (the value behind `handle.agent`). */
@@ -36,7 +40,7 @@ export interface AgentHandle {
 export interface AgentsService {
   create(opts: {
     sessionId: string
-    meta?: { cwd?: string }
+    meta?: { cwd?: string; agentPreset?: string }
     agentOptions?: Record<string, unknown>
     setup?: (agentCtx: any) => Promise<void> | void
   }): Promise<AgentHandle>
@@ -89,6 +93,8 @@ export interface ApprovalService {
 export interface AgentPresetsService {
   list(): Promise<{ id: string; name?: string; description?: string }[]>
   mount(agentCtx: any, id: string): Promise<void>
+  /** Rebind one live agent's scope to another standing preset composition (blank sessions). */
+  recompose?(agentCtx: any, id: string): Promise<{ id: string }>
   /** The deployment's default preset id (settings layer first, then config). */
   defaultId?: string
 }
@@ -113,6 +119,10 @@ export interface FsService {
 /** `sandboxPolicy` service surface. */
 export interface SandboxPolicyService {
   workspaceRoot?: string
+  /** The deployment default mode — the fallback beneath a session override. */
+  defaultMode?: string
+  /** Resolve the complete policy for one session (override → deployment default). */
+  resolve?(request: { session?: any }): { mode: string; workspaceRoot: string }
 }
 
 /** `attachments` service surface. */

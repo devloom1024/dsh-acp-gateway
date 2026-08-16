@@ -9,7 +9,8 @@
  * Endpoint candidates are tried in order (env → endpoint file → default) and
  * the bridge remembers the first reachable one, failing over to the next
  * candidate when the active endpoint stops responding (e.g. a stale
- * `~/.dsh/acp/endpoint` file pointing at a dead instance).
+ * `$DSH_ACP_HOME/acp/endpoint` or `~/.dsh/acp/endpoint` file pointing at a
+ * dead instance).
  *
  * @module dsh-acp-gateway/bridge
  */
@@ -46,7 +47,8 @@ export function resolveEndpoints(): string[] {
   const list = []
   if (process.env.DSH_ACP_URL) list.push(process.env.DSH_ACP_URL)
   try {
-    const p = path.join(os.homedir(), '.dsh', 'acp', 'endpoint')
+    const dshHome = process.env.DSH_ACP_HOME || process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+    const p = path.join(dshHome, 'acp', 'endpoint')
     const v = fs.readFileSync(p, 'utf8').trim()
     if (v) list.push(v)
   } catch (e) {
