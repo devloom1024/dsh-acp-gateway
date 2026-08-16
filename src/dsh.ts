@@ -102,6 +102,15 @@ export interface AgentPresetsService {
 /** `sessionQuery` service surface. */
 export interface SessionQueryService {
   listSessions(): Promise<{ header: { id: string; cwd?: string; title?: string; updatedAt?: string | number } }[]>
+  /** Fold the latest logged title per session (best effort; absent when unsupported). */
+  readTitleSnapshots?(
+    sessionIds: string[],
+  ): Promise<
+    (
+      | { sessionId: string; status: 'fulfilled'; value: { title?: { title: string } } }
+      | { sessionId: string; status: 'rejected'; reason: unknown }
+    )[]
+  >
 }
 
 /** `shell` service surface. */

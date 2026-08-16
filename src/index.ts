@@ -465,6 +465,8 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const handles = new Map<string, AgentHandle>()
   const sessionConfigs = new Map<string, { providerId?: string; modelId?: string; reasoningEffort?: string; preset?: string }>()
   const appliedOptions = new Map<string, { provider?: string | null; model?: string | null; reasoningEffort?: string | null; preset?: string }>()
+  /** Last title text notified per ACP session (identical repeats are suppressed). */
+  const lastTitles = new Map<string, string>()
   const subscribers = new Set()
   const inflightPrompts = new Map<string, { turn: number; clearTimer: () => void; resolve: (reason: StopReason) => void; reject: (err: Error) => void }>()
   const announcedToolCalls = new Set<string>()
@@ -526,6 +528,32 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   }
 
   // ---- event -> ACP notification mapping ----------------------------------
+  /** The session's latest logged title (the last `session/title` event), if any. */
+  const sessionTitleFor = (agent: DshAgent | null): string | undefined => {
+    try {
+      const events = agent && agent.session && (agent.session.events || agent.session.log)
+      if (Array.isArray(events)) {
+        for (let i = events.length - 1; i >= 0; i -= 1) {
+          const e = events[i]
+          if (e && e.type === 'session/title' && typeof e.data.title === 'string') return e.data.title
+        }
+      }
+    } catch (e) {
+      /* fall through */
+    }
+    return undefined
+  }
+  /** Forward one session title to clients: identical repeats are suppressed. */
+  const notifyTitle = (acpSessionId: string, title: string | undefined): void => {
+    if (typeof title !== 'string' || title.length === 0) return
+    if (lastTitles.get(acpSessionId) === title) return
+    lastTitles.set(acpSessionId, title)
+    notifyUpdate(acpSessionId, {
+      sessionUpdate: 'session_info_update',
+      title,
+      updatedAt: new Date().toISOString(),
+    })
+  }
   const mapSessionEvent = (acpSessionId: string, event: any): void => {
     switch (event.type) {
       case 'assistant/chunk': {
@@ -645,14 +673,14 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
         break
       }
       case 'session/title': {
-        const title = event.data && event.data.title
-        if (typeof title === 'string') {
-          notifyUpdate(acpSessionId, {
-            sessionUpdate: 'session_info_update',
-            title,
-            updatedAt: new Date().toISOString(),
-          })
-        }
+        // The deterministic fallback title (a truncation of the first message)
+        // is a placeholder that the provider title supersedes seconds later;
+        // forwarding it refreshes the client's title twice per session. Only
+        // user-pinned and provider titles notify, and identical repeats are
+        // suppressed (a session whose title never changes notifies once).
+        const source = event.data && event.data.source && event.data.source.kind
+        if (source === 'fallback') break
+        notifyTitle(acpSessionId, event.data && event.data.title)
         break
       }
       case 'plan/mode': {
@@ -1078,6 +1106,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           if (!acpSessionId) return fail(-32602, 'session/load requires params.sessionId')
           const existingHandle = handles.get(acpSessionId)
           if (existingHandle) {
+            notifyTitle(acpSessionId, sessionTitleFor(existingHandle.agent))
             const opts = await buildConfigOptionsFor(acpSessionId)
             return respond({ modes: await sessionModesFor(acpSessionId, existingHandle.agent), configOptions: opts })
           }
@@ -1088,6 +1117,10 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             replayHistory(acpSessionId, handle.agent)
             advertiseCommands(acpSessionId, handle.agent)
             recordApplied(acpSessionId)
+            // Re-surface the session's current title once (deduped): a client
+            // that loads an already-titled session must see its title even
+            // when the generating event happened before it connected.
+            notifyTitle(acpSessionId, sessionTitleFor(handle.agent))
             const opts = await buildConfigOptionsFor(acpSessionId)
             return respond({ modes: await sessionModesFor(acpSessionId, handle.agent), configOptions: opts })
           } catch (e) {
@@ -1103,6 +1136,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           if (!acpSessionId) return fail(-32602, 'session/resume requires params.sessionId')
           const existingHandle = handles.get(acpSessionId)
           if (existingHandle) {
+            notifyTitle(acpSessionId, sessionTitleFor(existingHandle.agent))
             const opts = await buildConfigOptionsFor(acpSessionId)
             return respond({ modes: await sessionModesFor(acpSessionId, existingHandle.agent), configOptions: opts })
           }
@@ -1112,6 +1146,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             configureAgent(handle.agent)
             advertiseCommands(acpSessionId, handle.agent)
             recordApplied(acpSessionId)
+            notifyTitle(acpSessionId, sessionTitleFor(handle.agent))
             const opts = await buildConfigOptionsFor(acpSessionId)
             return respond({ modes: await sessionModesFor(acpSessionId, handle.agent), configOptions: opts })
           } catch (e) {
@@ -1241,11 +1276,25 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           if (sessionQuery) {
             try {
               const records = await sessionQuery.listSessions()
+              const ids = records.map((r) => r.header.id)
+              // Session headers carry no title; fold the latest logged
+              // `session/title` per session so the picker shows real names.
+              const titleById = new Map<string, string>()
+              if (ids.length > 0 && typeof sessionQuery.readTitleSnapshots === 'function') {
+                try {
+                  const snapshots = await sessionQuery.readTitleSnapshots(ids)
+                  for (const s of snapshots) {
+                    if (s.status === 'fulfilled' && s.value && s.value.title) titleById.set(s.sessionId, s.value.title.title)
+                  }
+                } catch (e) {
+                  /* best effort */
+                }
+              }
               for (const r of records) {
                 list.push({
                   sessionId: r.header.id,
                   cwd: r.header.cwd || undefined,
-                  title: r.header.title || undefined,
+                  title: titleById.get(r.header.id) || r.header.title || undefined,
                   updatedAt: r.header.updatedAt ? new Date(r.header.updatedAt).toISOString() : undefined,
                 })
               }
@@ -1264,6 +1313,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           const acpSessionId = String(params.sessionId || '')
           sessionConfigs.delete(acpSessionId)
           appliedOptions.delete(acpSessionId)
+          lastTitles.delete(acpSessionId)
           const handle = handles.get(acpSessionId)
           if (handle) {
             try {

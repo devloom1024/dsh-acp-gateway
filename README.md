@@ -90,7 +90,7 @@ versions in sync.
 | ✅ Elicitation | DSH `ask_user_question` surfaces as an ACP `elicitation/create` form; answers feed back as the tool result |
 | ✅ Thinking stream | `agent_thought_chunk` from DSH reasoning chunks |
 | ✅ Agent plan | `exit_plan_mode` markdown → ACP `plan` notification (entries) |
-| ✅ Session info | `session_info_update` on title changes |
+| ✅ Session info | `session_info_update` on title changes — the deterministic fallback placeholder is suppressed, so a session's title notifies once (or on real change) and stays fixed |
 
 ## Architecture
 
@@ -249,7 +249,7 @@ Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_c
 
 Session config options: `mode` (the agent presets — standard / code(PTC) / minimal / creation / your custom presets), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). `model` and `thought_level` route through the per-agent request waterfall (like the web GUI's model selector) and take effect on the next prompt without disposing the session; `mode` recomposes a not-yet-started session immediately and re-composes a started one at the next prompt; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). `configOptions` report the session's **actual** current state — the client's pending choice, else the session's own logged request header / recorded preset / sandbox policy resolution — so a session loaded after a server restart shows the config it really runs, not the ambient default. Both `configOptions` and the `modes` field are returned (transition period per the spec).
 
-Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). DSH `ask_user_question` maps to an ACP `elicitation/create` form.
+Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). Titles are stable by design: DSH first logs a deterministic fallback title (a truncation of the first message) and supersedes it with the LLM/provider title seconds later — the gateway suppresses the fallback and notifies only user-pinned and provider titles, deduped per session, so the client sees one title that stays fixed (a genuinely changing title still updates). `session/load` / `session/resume` re-surface the session's current title once (for clients that connect after it was set), and `session/list` folds the latest logged title per session. DSH `ask_user_question` maps to an ACP `elicitation/create` form.
 
 Content: `text`, `resource` (embedded context), `resource_link`, `image`, `audio`.
 

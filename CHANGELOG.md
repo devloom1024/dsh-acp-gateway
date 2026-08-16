@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.10.2] - 2026-08-16
+
+### Fixed
+- Session titles no longer refresh repeatedly. DSH logs a deterministic
+  fallback title (a truncation of the first user message) immediately and
+  supersedes it with the LLM/provider title seconds later; the gateway
+  forwarded both, so every session flashed two titles. The fallback is now
+  suppressed — only user-pinned and provider titles notify, deduped per
+  session — so the client receives one title that stays fixed, while a
+  genuinely changing title (e.g. all-prompts re-titling) still updates.
+- `session/load` and `session/resume` re-surface the session's current title
+  once, so a client that connects after the title was generated (or after a
+  gateway restart) still sees it.
+- `session/list` now folds the latest logged title per session (session
+  headers carry no title field, so the picker previously showed untitled
+  entries); missing titles and snapshot failures degrade gracefully.
+
 ## [3.10.1] - 2026-08-16
 
 ### Fixed
