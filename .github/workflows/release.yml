@@ -6,9 +6,9 @@ on:
 
 permissions:
   contents: write
-
-env:
-  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # Needed for npm OIDC trusted publishing: GitHub mints a short-lived OIDC
+  # token that npm exchanges for a publish credential (no NPM_TOKEN secret).
+  id-token: write
 
 jobs:
   release:
@@ -24,14 +24,12 @@ jobs:
       - run: npm run check:registry
       - run: npm run build
       - run: npm test
-      # Publish to the official npm registry when NPM_TOKEN is configured
-      # (automation tokens bypass 2FA). Skipped otherwise, so the GitHub
-      # Release still works without npm credentials.
-      - name: Publish to npm
-        if: env.NPM_TOKEN != ''
-        run: npm publish --registry=https://registry.npmjs.org
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Publish via npm OIDC trusted publishing: the npm CLI exchanges the
+      # GitHub OIDC token for a short-lived registry token (npm >= 9.6), so
+      # no NPM_TOKEN secret is stored. Requires the trusted publisher entry
+      # on https://www.npmjs.com/settings/<user>/publish-access for this repo.
+      - name: Publish to npm (OIDC trusted publishing)
+        run: npm publish --provenance --access public
       # Build the offline archive (system-node variant) and attach it to the
       # GitHub Release. Platform-native prebuilds (node-pty etc.) mean each
       # platform needs its own archive — build on the target platform.
