@@ -18,16 +18,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run check:registry
       - run: npm run build
       - run: npm test
+      # Trusted publishing requires npm CLI >= 11.5.1; pin the runner's npm
+      # so OIDC exchange is guaranteed regardless of the bundled version.
+      - run: npm install -g npm@latest
       # Publish via npm OIDC trusted publishing: the npm CLI exchanges the
-      # GitHub OIDC token for a short-lived registry token (npm >= 9.6), so
-      # no NPM_TOKEN secret is stored. Requires the trusted publisher entry
-      # on https://www.npmjs.com/settings/<user>/publish-access for this repo.
+      # GitHub OIDC token for a short-lived registry token, so no NPM_TOKEN
+      # secret is stored. Requires the Trusted Publisher entry under the
+      # package settings on npmjs.com for this repo + the release.yml workflow.
       - name: Publish to npm (OIDC trusted publishing)
         run: npm publish --provenance --access public
       # Build the offline archive (system-node variant) and attach it to the
