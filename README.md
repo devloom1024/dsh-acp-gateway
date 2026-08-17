@@ -259,6 +259,7 @@ Not implemented (by design): client-cooperative capabilities (`fs/*`, `terminal/
 
 | Symptom | Cause / fix |
 |---|---|
+| "ACP prompt timed out" | The gateway's hard 10-minute prompt timer was removed by default — a turn now runs until DSH finishes it (its own timeout/abort machinery and per-tool timeouts apply, and the client can `session/cancel`). If you still want a gateway-level cap, mount the plugin with `promptTimeoutMs` (ms; a fired timer also cancels the agent turn so client and session stay consistent) |
 | Editor stuck on "loading" | The bridge could not reach any endpoint. Check `~/.dsh/acp/endpoint` points at a live server (`DSH_ACP_URL` overrides), or use direct mode (`npx -y dsh-acp-gateway`). The bridge now answers with a JSON-RPC error and re-reads the endpoint file instead of hanging |
 | Typing `/` shows no slash commands | Zed drops `available_commands_update` sent before the `session/new` response ([zed#60199](https://github.com/zed-industries/zed/issues/60199)); this gateway holds notifications until after the response — restart the agent and create a fresh session |
 | `session/delete` leaves sessions behind | Fixed: persisted session dirs are removed with direct fs |

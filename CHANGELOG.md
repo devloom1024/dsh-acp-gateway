@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.10.3] - 2026-08-16
+
+### Fixed
+- Removed the hardcoded 10-minute `session/prompt` timeout that killed any
+  turn running longer — including legitimate long work (subagent delegation,
+  long research) and `ask_user_question` elicitation forms waiting on the
+  user. The gateway no longer imposes its own prompt timer by default: the
+  turn lifecycle is DSH-owned (its timeout/abort machinery and per-tool
+  timeouts apply, and the client can `session/cancel`). Deployments that
+  want a gateway-level cap can set `promptTimeoutMs` in the plugin config;
+  when the timer fires it now also cancels the agent turn, so the session
+  does not keep running detached from a client that was told the prompt
+  failed.
+
 ## [3.10.2] - 2026-08-16
 
 ### Fixed

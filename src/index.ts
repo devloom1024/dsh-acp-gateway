@@ -63,11 +63,18 @@ const FALLBACK_MODE_ID = 'standard'
  * @param stdioScriptPath - where the generated bridge script is written.
  * @param provider - model provider route (used when no DSH default model exists).
  * @param model - model id (used when no DSH default model exists).
+ * @param promptTimeoutMs - hard cap on one ACP prompt/turn in milliseconds.
+ *   Absent or 0 disables the gateway timer: the turn lifecycle is fully
+ *   DSH-owned (its own timeout/abort machinery and per-tool timeouts apply,
+ *   and the client can always `session/cancel`). A long turn — an
+ *   `ask_user_question` elicitation waiting on the user, subagent
+ *   delegation, long research — must not be killed by an arbitrary cap.
  */
 export interface GatewayConfig {
   stdioScriptPath?: string
   provider?: string
   model?: string
+  promptTimeoutMs?: number
 }
 
 
@@ -85,6 +92,8 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   }
   const webServer = ctx.get('webServer')
   const agents = ctx.agents
+  // 0/absent = no gateway-level prompt timer (DSH owns turn lifecycle).
+  const promptTimeoutMs = config.promptTimeoutMs ?? 0
   const sessionQueryNow = (): SessionQueryService | undefined => ctx.get('sessionQuery')
   const fsNow2 = (): FsService | undefined => ctx.get('fs')
   const shellNow2 = (): ShellService | undefined => ctx.get('shell')
@@ -800,10 +809,20 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     new Promise((resolve, reject) => {
       const agent = handle.agent
       const turn = (agent.session.log as any[]).filter((e: any) => e.type === 'turn/end').length + 1
-      let clearTimer = ctx.timeout(() => {
-        inflightPrompts.delete(acpSessionId)
-        reject(new Error('ACP prompt timed out'))
-      }, 600000)
+      let clearTimer = () => {}
+      if (promptTimeoutMs > 0) {
+        clearTimer = ctx.timeout(() => {
+          inflightPrompts.delete(acpSessionId)
+          // Keep client and session consistent: abort the turn instead of
+          // leaving it running detached from a client that was told it failed.
+          try {
+            agent.cancel({ kind: 'user' })
+          } catch (e) {
+            /* already gone */
+          }
+          reject(new Error(`ACP prompt timed out after ${promptTimeoutMs}ms (configure promptTimeoutMs to adjust or disable)`))
+        }, promptTimeoutMs)
+      }
       inflightPrompts.set(acpSessionId, {
         turn,
         clearTimer,
