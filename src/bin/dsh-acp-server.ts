@@ -186,6 +186,14 @@ const patches = [
   {
     insert: [
       { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver', config: { host: '127.0.0.1', port: 0 } },
+      // The shipped `standard`/`ptc` presets enable subagent model selection
+      // (`tool-subagent modelSelectionSettings: true`); that requires the
+      // Host-owned service `ctx.subagentModelSelection`, provided by this row
+      // (0.1.2-alpha.1+). It registers a user-settings namespace
+      // (`subagent-model-selection`, default off) read when a new top-level
+      // session is composed. Official web profiles mount it on the Host plane;
+      // the standalone server must too — otherwise every preset mount fails.
+      { id: 'subagent-model-selection-settings', name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings' },
       // The shipped preset root only; the service appends the home's own
       // `.agent-presets` user root automatically, so a shared home sees the
       // same roster (and default) as the web GUI. `default` is the row's base

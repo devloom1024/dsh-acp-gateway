@@ -13,7 +13,7 @@ sessions, and settings as the Web GUI.
 > | Field | Value |
 > |---|---|
 > | Name | `dsh-acp-gateway` |
-> | Version | 3.11.0 |
+> | Version | 3.11.1 |
 > | Transport | stdio (JSON-RPC 2.0, newline-delimited) |
 > | Protocol | ACP v1 |
 > | Command | `npx -y dsh-acp-gateway` |
@@ -60,7 +60,7 @@ It is a standard ACP registry JSON with an `npx` distribution:
 {
   "distribution": {
     "npx": {
-      "package": "dsh-acp-gateway@3.11.0"
+      "package": "dsh-acp-gateway@3.11.1"
     }
   }
 }

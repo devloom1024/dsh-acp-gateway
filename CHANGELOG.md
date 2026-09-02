@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.11.1] - 2026-09-02
+
+### Fixed
+- Standalone `dsh-acp-server` mounts
+  `@deepseek-ai/dsh-tool-subagent/model-selection-settings` on the Host plane.
+  The shipped 0.1.2-alpha.4 `standard`/`ptc` presets enable subagent model
+  selection (`tool-subagent modelSelectionSettings: true`), which requires the
+  Host-owned `ctx.subagentModelSelection` service; without the row every
+  preset mount failed with
+  "`modelSelectionSettings` requires
+  @deepseek-ai/dsh-tool-subagent/model-selection-settings in the Host scope"
+  — observable as `mode switch failed` in clients (Zed) when the default
+  `standard` mode was (re)mounted. The row registers the
+  `subagent-model-selection` user-settings namespace (default off), exactly
+  like the official web profile.
+
 ## [3.11.0] - 2026-09-02
 
 ### Changed

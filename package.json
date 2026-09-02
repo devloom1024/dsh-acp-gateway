@@ -1,6 +1,6 @@
 {
   "name": "dsh-acp-gateway",
-  "version": "3.11.0",
+  "version": "3.11.1",
   "description": "Third-party, complete DeepSeek Harness agent over the Agent Client Protocol (ACP) — a superset of the official automation-only @deepseek-ai/dsh-acp: streaming, tool calls, sessions, slash commands, agent presets, config options. npx one-command, offline archive, works with Zed / VS Code ACP / Claude Code.",
   "repository": {
     "type": "git",

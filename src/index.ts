@@ -1094,7 +1094,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
               promptCapabilities: { image: true, audio: true, embeddedContext: true },
               sessionCapabilities: { list: {}, delete: {}, resume: {} },
             },
-            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.11.0' },
+            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.11.1' },
             authMethods: [],
           })
         }
@@ -1551,7 +1551,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             record.steps.push({ request: request.method, id: request.id, response })
             return response
           }
-          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.11.0' } } })
+          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.11.1' } } })
           const cwd = (sandboxPolicyNow() && sandboxPolicyNow()!.workspaceRoot) || '.'
           const newRes = await push({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } })
           const sessionId = newRes && newRes.result ? newRes.result.sessionId : null
