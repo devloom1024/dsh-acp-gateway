@@ -9,11 +9,33 @@
  */
 import type { NeverSignal, SessionModeState } from './codec.js'
 
+/**
+ * The session's durable event log as a plain array. 0.1.2-alpha.4 removed the
+ * public `Session.events` accessor in favor of `snapshotEvents()` /
+ * `eventAt()` / `seq`; this helper prefers the new API and falls back to the
+ * legacy accessors on pre-alpha.4 runtimes.
+ */
+export function sessionEvents(session: any): any[] {
+  try {
+    if (session && typeof session.snapshotEvents === 'function') {
+      const snapshot = session.snapshotEvents()
+      if (Array.isArray(snapshot)) return snapshot as any[]
+    }
+  } catch (e) {
+    /* fall through */
+  }
+  return session && (session.events || session.log) ? (session.events || session.log) : []
+}
+
 /** A DSH agent session (persisted log + event append). */
 export interface DshSession {
   readonly id: string
-  readonly log: any[]
-  readonly events: any[]
+  /**
+   * On-demand immutable full log snapshot: the 0.1.2-alpha.4 replacement for the
+   * legacy public `events` accessor (alpha.4 removed `Session.events` and
+   * `Session.log` visibility in favor of `snapshotEvents()`/`eventAt()`/`seq`).
+   */
+  snapshotEvents?(fromSeq?: any, toSeqExclusive?: any): readonly any[]
   append(type: string, data: any, opts?: any): any
   /** Durable creation metadata; `agentPreset` names the preset the session started under. */
   readonly header?: { cwd?: string; agentPreset?: string }
@@ -26,6 +48,7 @@ export interface DshAgent {
   readonly ctx: any
   readonly session: any
   followup(userMsg: any): void
+  /** `cancel(cause)` since 0.1.2; a plain `{ kind: string }` remains the callers' shape. */
   cancel(opts: { kind: string }): void
   inject?(message: any): void
 }
@@ -80,6 +103,7 @@ export interface CommandsService {
   execute(
     agent: DshAgent,
     line: string,
+    images: readonly never[],
     signal: NeverSignal,
   ): Promise<{ commandId: string; result?: { kind?: string; text?: string; content?: any[] } } | undefined>
 }
@@ -101,7 +125,15 @@ export interface AgentPresetsService {
 
 /** `sessionQuery` service surface. */
 export interface SessionQueryService {
-  listSessions(): Promise<{ header: { id: string; cwd?: string; title?: string; updatedAt?: string | number } }[]>
+  listSessions(signal?: AbortSignal): Promise<{
+    header: {
+      id: string
+      cwd?: string
+      createdAt?: number
+      title?: string
+      updatedAt?: string | number
+    }
+  }[]>
   /** Fold the latest logged title per session (best effort; absent when unsupported). */
   readTitleSnapshots?(
     sessionIds: string[],

@@ -17,6 +17,7 @@
  */
 import type { Context, Service } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { NeverSignal, SessionModeState, ConfigOptionsInput } from './codec.js'
 import type {
   AgentsService,
@@ -36,6 +37,7 @@ import type {
   AgentHandle,
   DshAgent,
 } from './dsh.js'
+import { sessionEvents } from './dsh.js'
 import {
   turnEndToStopReason,
   toolKind,
@@ -155,7 +157,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     return size
   }
   /** Agent options for one session: session config overrides the ambient selection. */
-  const agentOptionsFor = (acpSessionId?: string): { provider?: string; model?: string; reasoningEffort?: string } => {
+  const agentOptionsFor = (acpSessionId?: string): { provider?: string; model?: string; reasoningEffort?: ReturnType<typeof ReasoningEffortId> } => {
     const sel = modelSelection()
     if (!sel) return {}
     const cfg = acpSessionId ? sessionConfigs.get(acpSessionId) : undefined
@@ -165,13 +167,13 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     return {
       provider,
       model,
-      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(reasoningEffort ? { reasoningEffort: ReasoningEffortId(reasoningEffort) } : {}),
     }
   }
   /** The session's current sandbox mode (permission level) from its log. */
   const sandboxModeFor = (agent: DshAgent): string | null => {
     try {
-      const events = agent.session.log || agent.session.events || []
+      const events = sessionEvents(agent.session)
       for (let i = events.length - 1; i >= 0; i -= 1) {
         if (events[i].type === 'sandbox/mode') return events[i].data && events[i].data.mode
       }
@@ -190,7 +192,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
    */
   const sessionPresetOf = (session: any): string | undefined => {
     try {
-      const events = session && (session.events || session.log)
+      const events = sessionEvents(session)
       if (Array.isArray(events)) {
         for (let i = events.length - 1; i >= 0; i -= 1) {
           const e = events[i]
@@ -540,7 +542,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   /** The session's latest logged title (the last `session/title` event), if any. */
   const sessionTitleFor = (agent: DshAgent | null): string | undefined => {
     try {
-      const events = agent && agent.session && (agent.session.events || agent.session.log)
+      const events = agent && agent.session ? sessionEvents(agent.session) : []
       if (Array.isArray(events)) {
         for (let i = events.length - 1; i >= 0; i -= 1) {
           const e = events[i]
@@ -761,7 +763,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const line = text.trim()
     const name = line.slice(1).split(/\s+/)[0]
     if (!name || !commands.find(agent, name)) return null
-    const execution = await commands.execute(agent, line, makeNeverSignal())
+    const execution = await commands.execute(agent, line, [], makeNeverSignal())
     if (!execution) return null
     // Handlers return `{ kind, text }` (e.g. `/plan` → "Plan mode on."); a
     // content-block result is also accepted for compatibility.
@@ -808,7 +810,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const runPrompt = (handle: AgentHandle, acpSessionId: string, text: string): Promise<{ stopReason: StopReason }> =>
     new Promise((resolve, reject) => {
       const agent = handle.agent
-      const turn = (agent.session.log as any[]).filter((e: any) => e.type === 'turn/end').length + 1
+      const turn = sessionEvents(agent.session).filter((e: any) => e.type === 'turn/end').length + 1
       let clearTimer = () => {}
       if (promptTimeoutMs > 0) {
         clearTimer = ctx.timeout(() => {
@@ -976,7 +978,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const session = agent.session
     let blank = false
     try {
-      const events = session && (session.events || session.log)
+      const events = sessionEvents(session)
       blank = !(Array.isArray(events) && events.some((e: any) => e && e.type === 'turn/start'))
     } catch (e) {
       /* treat as started */
@@ -1044,7 +1046,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
 
   // ---- session/load history replay -------------------------------------------
   const replayHistory = (acpSessionId: string, agent: DshAgent): void => {
-    for (const event of agent.session.log as any[]) {
+    for (const event of sessionEvents(agent.session)) {
       if (event.type === 'user/message') {
         const text = (event.data.content as any[]).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
         if (text) notifyUpdate(acpSessionId, { sessionUpdate: 'user_message_chunk', messageId: String(event.seq), content: { type: 'text', text } })
@@ -1092,7 +1094,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
               promptCapabilities: { image: true, audio: true, embeddedContext: true },
               sessionCapabilities: { list: {}, delete: {}, resume: {} },
             },
-            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.10.0' },
+            agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.11.0' },
             authMethods: [],
           })
         }
@@ -1314,7 +1316,13 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
                   sessionId: r.header.id,
                   cwd: r.header.cwd || undefined,
                   title: titleById.get(r.header.id) || r.header.title || undefined,
-                  updatedAt: r.header.updatedAt ? new Date(r.header.updatedAt).toISOString() : undefined,
+                  // Session headers carry no updatedAt field; the closest durable
+                  // timestamp is the header's createdAt (or the title snapshot's).
+                  updatedAt: r.header.updatedAt
+                    ? new Date(r.header.updatedAt).toISOString()
+                    : r.header.createdAt
+                      ? new Date(r.header.createdAt).toISOString()
+                      : undefined,
                 })
               }
             } catch (e) {
@@ -1323,7 +1331,12 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           }
           if (list.length === 0) {
             for (const [sid, handle] of handles) {
-              list.push({ sessionId: sid, cwd: handle.agent.session.cwd || undefined, updatedAt: new Date(handle.agent.session.updatedAt || Date.now()).toISOString() })
+              const header = handle.agent.session && handle.agent.session.header
+              list.push({
+                sessionId: sid,
+                cwd: (header && header.cwd) || handle.agent.session.cwd || undefined,
+                updatedAt: new Date((header && header.createdAt) || handle.agent.session.updatedAt || Date.now()).toISOString(),
+              })
             }
           }
           return respond({ sessions: list })
@@ -1538,7 +1551,7 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             record.steps.push({ request: request.method, id: request.id, response })
             return response
           }
-          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.10.0' } } })
+          await push({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'dsh-acp-test', version: '3.11.0' } } })
           const cwd = (sandboxPolicyNow() && sandboxPolicyNow()!.workspaceRoot) || '.'
           const newRes = await push({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } })
           const sessionId = newRes && newRes.result ? newRes.result.sessionId : null

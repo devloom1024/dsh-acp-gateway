@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.11.0] - 2026-09-02
+
+### Changed
+- Reference the DeepSeek Harness 0.1.2-alpha.4 runtime
+  (`@deepseek-ai/dsh` / `@deepseek-ai/dsh-app-boot` /
+  `@deepseek-ai/dsh-tools` `^0.1.2-alpha.4`), the latest published
+  version. Verified against the official release notes:
+  `Session.events` was replaced by on-demand reads (`seq`, `eventAt()`,
+  `snapshotEvents()`), `AgentOptions.reasoningEffort` is now the
+  `ReasoningEffortId` brand, `commands.execute` gained an `images`
+  parameter, `healProfilesModuleFallback` takes an options object (and is
+  async), and the shipped agent presets were republished through
+  `@deepseek-ai/dsh-agent-presets/presets` (the `code` preset was renamed
+  `ptc`).
+- Session event reads now go through `snapshotEvents()` in preference to the
+  removed `Session.events`/`Session.log` accessors (with a compatible
+  fallback for older runtimes), so log scans (preset, title, sandbox mode,
+  history replay, turn counting) keep working on alpha.4.
+- `reasoningEffort` is branded via `ReasoningEffortId` before it reaches
+  `agents.create` / `agents.resume`, matching the new `AgentOptions` type.
+- Slash-command execution passes the new required `images` argument
+  (`commands.execute(agent, line, images, signal)`).
+- `dsh-acp-server` locations the shipped preset roster from
+  `@deepseek-ai/dsh-agent-presets/presets` (first choice), falling back to the
+  legacy `<dsh>/config/agent-presets` layout and the bundle's own copy; the
+  `agent-presets` row now sets `includeShippedRoot`/`includeUserRoot`.
+- Shipped presets in `config/agent-presets` synced to the official
+  0.1.2-alpha.4 roster (`standard`, `minimal`, `ptc`, `cordis`; the old `code`
+  directory is gone — PTC mode is the `ptc` preset with `mode: ptc`).
+
 ## [3.10.3] - 2026-08-16
 
 ### Fixed

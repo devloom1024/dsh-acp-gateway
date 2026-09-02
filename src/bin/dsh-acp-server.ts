@@ -127,16 +127,21 @@ const baseManifest = JSON.parse(readFileSync(join(baseDir, 'package.json'), 'utf
 const basePatchPath = join(baseDir, baseManifest.dsh?.bundle?.patch ?? 'cordis.patch.yml')
 
 /**
- * Agent presets (the `standard` preset the gateway mounts per agent) live
- * beside the dsh installation. The dsh-app-boot package sits under the dsh
- * install's node_modules in the typical (npx) layout; when that layout is
- * absent the preset row is simply not configured and agents keep the
- * composition's tool surface.
+ * Agent presets (the `standard` preset the gateway mounts per agent) come from
+ * the official `@deepseek-ai/dsh-agent-presets` package: since 0.1.2 the
+ * shipped presets moved out of the dsh CLI package into
+ * `<pkg>/presets/{standard,minimal,ptc,cordis}`. Fallbacks keep older
+ * layouts working: a `config/agent-presets` directory beside the dsh app
+ * (pre-0.1.2 npm-flat layout) and the offline bundle's own copy.
  */
 function shippedPresetRoot() {
-  // The shipped presets live beside the dsh app (`<app>/config/agent-presets`),
-  // which the anchor lookup resolves in every layout (npm-flat, global-nested,
-  // portable vendor).
+  try {
+    const presetPkg = resolvePackageDir('@deepseek-ai/dsh-agent-presets')
+    const candidate = join(presetPkg, 'presets')
+    return readFileSync(join(candidate, 'standard', 'preset.yml'), 'utf8') ? candidate : null
+  } catch (e) {
+    /* keep looking */
+  }
   try {
     const anchor = dshInstallAnchor()
     if (anchor) {
@@ -185,9 +190,12 @@ const patches = [
       // `.agent-presets` user root automatically, so a shared home sees the
       // same roster (and default) as the web GUI. `default` is the row's base
       // (the web profile declares `standard`); a shared home's settings layer
-      // (`agent-presets.default`) overrides it live.
+      // (`agent-presets.default`) overrides it live. includeShippedRoot stays
+      // false so this explicitly resolved root is the only system layer (the
+      // package's bundled presets are the same directory resolution reachable
+      // through the dsh CLI, and mounting them twice would duplicate ids).
       ...(presetRoot
-        ? [{ id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'standard', roots: [{ path: presetRoot, trust: 'system' }] } }]
+        ? [{ id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'standard', roots: [{ path: presetRoot, trust: 'system' }], includeShippedRoot: false, includeUserRoot: true } }]
         : []),
       {
         id: 'acp-gateway',
@@ -213,7 +221,7 @@ if (anchor === null) {
   process.stderr.write(`${NAME}: cannot locate the @deepseek-ai/dsh installation (needed for the dsh-base bundle and its dependencies)\n`)
   process.exit(1)
 }
-healProfilesModuleFallback(anchor, acpHome)
+await healProfilesModuleFallback({ installAnchor: anchor, home: acpHome })
 const bareModuleBaseUrl = pathToFileURL(join(acpHome, 'profiles', 'node_modules') + '/').href
 
 const ctx = await boot(NAME, EMPTY_CONFIG, patches, undefined, bareModuleBaseUrl)
