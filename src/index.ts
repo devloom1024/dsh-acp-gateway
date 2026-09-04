@@ -49,8 +49,10 @@ import {
   buildConfigOptions,
   buildBridgeScript,
   planMarkdownToEntries,
+  acpPromptToContent,
+  PROVIDER_DEFAULT_REASONING_EFFORT,
 } from './codec.js'
-import type { StopReason, SessionUpdate, ConfigOption, PlanEntry } from './types.js'
+import type { StopReason, SessionUpdate, ConfigOption, ConfigOptionValue, PlanEntry } from './types.js'
 import { randomUUID } from 'node:crypto'
 
 export const name = 'acp-gateway'
@@ -163,7 +165,10 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     const cfg = acpSessionId ? sessionConfigs.get(acpSessionId) : undefined
     const provider = (cfg && cfg.providerId) || sel.provider
     const model = (cfg && cfg.modelId) || sel.model
-    const reasoningEffort = (cfg && cfg.reasoningEffort) || sel.reasoningEffort
+    // An explicit `''` (provider default) clears any inherited effort; only a
+    // non-default effort id travels into agent options.
+    const rawEffort = cfg && cfg.reasoningEffort !== undefined ? cfg.reasoningEffort : sel.reasoningEffort
+    const reasoningEffort = rawEffort && rawEffort !== PROVIDER_DEFAULT_REASONING_EFFORT ? rawEffort : undefined
     return {
       provider,
       model,
@@ -253,17 +258,19 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           const loggedRoute =
             logged && logged.provider && logged.model ? { provider: logged.provider, model: logged.model } : undefined
           const route = cfgRoute || loggedRoute
-          const cfgEffort = (cfg && cfg.reasoningEffort) || undefined
-          if (!route && !cfgEffort) return resolved
           // An explicit client effort wins; otherwise inherit the logged
           // effort only while the route is unchanged (a new model starts at
           // its provider's default effort, like the loop's own rebuild rule).
+          // `''` (provider default) clears any inherited effort explicitly.
+          const hasCfgEffort = !!(cfg && cfg.reasoningEffort !== undefined)
+          const cfgEffort =
+            hasCfgEffort && cfg.reasoningEffort !== PROVIDER_DEFAULT_REASONING_EFFORT ? cfg.reasoningEffort : undefined
           const unchanged =
             route !== undefined &&
             loggedRoute !== undefined &&
             route.provider === loggedRoute.provider &&
             route.model === loggedRoute.model
-          const effort = cfgEffort || (unchanged && logged && logged.reasoningEffort) || undefined
+          const effort = cfgEffort || (!hasCfgEffort && unchanged && logged && logged.reasoningEffort) || undefined
           const out = route ? { ...resolved, provider: route.provider, model: route.model } : resolved
           return effort ? { ...out, reasoningEffort: effort } : out
         })
@@ -757,13 +764,17 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       /* no commands service */
     }
   }
-  const tryRunCommand = async (agent: DshAgent, text: string): Promise<{ stopReason: StopReason; output?: string } | null> => {
+  const tryRunCommand = async (
+    agent: DshAgent,
+    text: string,
+    images: { mediaType: string; data: string; name?: string }[] = [],
+  ): Promise<{ stopReason: StopReason; output?: string } | null> => {
     const commands = commandsNow()
     if (!commands || typeof text !== 'string' || !text.startsWith('/')) return null
     const line = text.trim()
     const name = line.slice(1).split(/\s+/)[0]
     if (!name || !commands.find(agent, name)) return null
-    const execution = await commands.execute(agent, line, [], makeNeverSignal())
+    const execution = await commands.execute(agent, line, images, makeNeverSignal())
     if (!execution) return null
     // Handlers return `{ kind, text }` (e.g. `/plan` → "Plan mode on."); a
     // content-block result is also accepted for compatibility.
@@ -779,35 +790,48 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   }
 
   // ---- prompt content conversion (text/image/audio/resource) ---------------
-  const buildPromptContent = async (acpBlocks: any[]): Promise<{ type: string; text?: string; data?: Uint8Array; mimeType?: string; uri?: string }[]> => {
-    const content = []
-    for (const b of Array.isArray(acpBlocks) ? acpBlocks : []) {
-      if (!b || typeof b !== 'object') continue
-      if (b.type === 'text') {
-        content.push({ type: 'text', text: b.text })
-      } else if (b.type === 'resource' && b.resource && typeof b.resource.text === 'string') {
-        content.push({ type: 'text', text: b.resource.text })
-      } else if (b.type === 'image' && b.data && attachmentsNow()) {
-        const attachments = attachmentsNow()
-        try {
-          const binary = atob(b.data)
-          const bytes = new Uint8Array(binary.length)
-          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-          const ref = await attachments!.saveImage({ data: bytes, mediaType: b.mimeType || 'image/png', name: b.uri || undefined })
-          content.push({ type: 'image', attachment: ref })
-        } catch (e: unknown) {
-          content.push({ type: 'text', text: `[image attachment failed to load: ${String((e instanceof Error && e.message) || e)}]` })
-        }
-      } else if (b.type === 'audio' && b.data) {
-        // DSH has no native audio block; pass a textual reference.
-        content.push({ type: 'text', text: `[audio attachment mimeType=${b.mimeType || 'unknown'} dataLength=${b.data.length}]` })
+  /**
+   * Read one local file the client attached by reference (`file://` or an
+   * absolute path) into text the model can see. Resolves `undefined` when the
+   * file is unreadable, binary, empty-safe, or above the size cap — the caller
+   * then degrades the reference to a textual placeholder, never dropping it.
+   */
+  const readLocalFile = async (uri: string): Promise<string | undefined> => {
+    if (typeof uri !== 'string' || uri.length === 0) return undefined
+    let path: string | undefined
+    if (uri.startsWith('file://')) {
+      try {
+        path = decodeURIComponent(uri.slice('file://'.length))
+        // Windows file URI: file:///C:/dir/file → C:/dir/file
+        if (/^\/[A-Za-z]:[\\/]/.test(path)) path = path.slice(1)
+      } catch (e) {
+        return undefined
       }
+    } else if (uri.startsWith('/') || /^[A-Za-z]:[\\/]/.test(uri)) {
+      // The client already supplied a local absolute path.
+      path = uri
+    } else {
+      return undefined
     }
-    return content
+    if (!path) return undefined
+    try {
+      const { readFile } = await import('node:fs/promises')
+      const MAX_ATTACHED_FILE_BYTES = 512 * 1024
+      const bytes = await readFile(path)
+      if (bytes.byteLength === 0) return ''
+      if (bytes.byteLength > MAX_ATTACHED_FILE_BYTES) return undefined
+      // NUL or heavy replacement-char sequences indicate binary content.
+      if (bytes.includes(0)) return undefined
+      const text = bytes.toString('utf8')
+      if (text.includes('\uFFFD')) return undefined
+      return text
+    } catch (e) {
+      return undefined
+    }
   }
 
   // ---- prompt execution -----------------------------------------------------
-  const runPrompt = (handle: AgentHandle, acpSessionId: string, text: string): Promise<{ stopReason: StopReason }> =>
+  const runPrompt = (handle: AgentHandle, acpSessionId: string, content: any[]): Promise<{ stopReason: StopReason }> =>
     new Promise((resolve, reject) => {
       const agent = handle.agent
       const turn = sessionEvents(agent.session).filter((e: any) => e.type === 'turn/end').length + 1
@@ -834,7 +858,9 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       const userMsg = {
         id: `acp-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         role: 'user',
-        content: [{ type: 'text', text }],
+        // The full admitted content (text AND image attachment blocks) reaches
+        // the agent — images must not be dropped to the text-only projection.
+        content,
         source: { kind: 'user' },
       }
       try {
@@ -895,14 +921,19 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     }
     return options
   }
-  const buildConfigOptionsFor = async (acpSessionId: string): Promise<ConfigOption[]> => {
+  /**
+   * The session's actual durable route: the client's pending choice, else the
+   * session's own logged request header, else the ambient model selection.
+   */
+  const currentRoute = async (acpSessionId: string): Promise<{
+    provider: string | null
+    model: string | null
+    logged?: { provider?: string; model?: string; reasoningEffort?: string }
+  }> => {
     const sel = modelSelection()
     const cfg = sessionConfigs.get(acpSessionId)
     const handle = handles.get(acpSessionId)
     const handleAgent = handle ? handle.agent : null
-    // The actual durable route: the session's own logged request header (the
-    // last request/header snapshot) — what the agent really runs, surviving
-    // restarts. The client's in-memory choice outranks it while pending.
     let logged: { provider?: string; model?: string; reasoningEffort?: string } | undefined
     try {
       const session = handleAgent && handleAgent.session
@@ -911,9 +942,55 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
     } catch (e) {
       /* no header fold */
     }
-    const providerId = (cfg && cfg.providerId) || (logged && logged.provider) || (sel && sel.provider) || null
-    const modelId = (cfg && cfg.modelId) || (logged && logged.model) || (sel && sel.model) || null
-    const effort = (cfg && cfg.reasoningEffort) || (logged && logged.reasoningEffort) || (sel && sel.reasoningEffort) || null
+    return {
+      provider: (cfg && cfg.providerId) || (logged && logged.provider) || (sel && sel.provider) || null,
+      model: (cfg && cfg.modelId) || (logged && logged.model) || (sel && sel.model) || null,
+      logged,
+    }
+  }
+  /**
+   * The reasoning-effort options for one exact route: the adapter-declared
+   * efforts plus a "Provider default" entry when the adapter configures none
+   * (the official model-control vocabulary; 0.1.2-rc.1 exposes it through
+   * `llm.resolveModelInfo().reasoning`). Empty when no route or reasoning
+   * catalog is available.
+   */
+  const reasoningEffortOptionsFor = async (
+    provider: string | null,
+    model: string | null,
+  ): Promise<ConfigOptionValue[]> => {
+    const llm = llmNow()
+    if (!llm || !provider || !model) return []
+    try {
+      const info = await llm.resolveModelInfo(provider, model)
+      const reasoning = info && info.reasoning
+      if (!reasoning) return []
+      const options: ConfigOptionValue[] = []
+      if (!reasoning.defaultEffort) options.push({ value: PROVIDER_DEFAULT_REASONING_EFFORT, name: 'Provider default' })
+      for (const e of reasoning.efforts) {
+        options.push({ value: String(e.id), name: e.name, ...(e.description ? { description: e.description } : {}) })
+      }
+      return options
+    } catch (e) {
+      return []
+    }
+  }
+  const buildConfigOptionsFor = async (acpSessionId: string): Promise<ConfigOption[]> => {
+    const sel = modelSelection()
+    const cfg = sessionConfigs.get(acpSessionId)
+    const handle = handles.get(acpSessionId)
+    const handleAgent = handle ? handle.agent : null
+    const { provider: providerId, model: modelId, logged } = await currentRoute(acpSessionId)
+    const effortOptions = await reasoningEffortOptionsFor(providerId, modelId)
+    // The actual current effort: the client's pending choice, else the logged
+    // header, else the ambient selection; when the route exposes effort
+    // options at all, the current value defaults to "Provider default".
+    let effort: string | null | undefined =
+      cfg && cfg.reasoningEffort !== undefined ? cfg.reasoningEffort : undefined
+    if (effort === undefined) {
+      effort = (logged && logged.reasoningEffort) || (sel && sel.reasoningEffort) || undefined
+    }
+    if (effort === undefined && effortOptions.length > 0) effort = PROVIDER_DEFAULT_REASONING_EFFORT
     const modelOptions = await allModelOptions()
     // The actual permission level: the sandbox policy's full resolution
     // (session override, else deployment default), falling back to a raw log
@@ -936,7 +1013,8 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
       currentModeId: modeState.currentModeId,
       availableModes: modeState.availableModes,
       modelId: providerId && modelId ? `${providerId}/${modelId}` : null,
-      reasoningEffort: effort,
+      reasoningEffort: effort ?? null,
+      effortOptions,
       modelOptions,
       sandboxMode,
     })
@@ -1048,8 +1126,13 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
   const replayHistory = (acpSessionId: string, agent: DshAgent): void => {
     for (const event of sessionEvents(agent.session)) {
       if (event.type === 'user/message') {
-        const text = (event.data.content as any[]).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
-        if (text) notifyUpdate(acpSessionId, { sessionUpdate: 'user_message_chunk', messageId: String(event.seq), content: { type: 'text', text } })
+        const blocks = Array.isArray(event.data.content) ? (event.data.content as any[]) : []
+        const text = blocks.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
+        const hasImage = blocks.some((b: any) => b.type === 'image')
+        const shown = text || (hasImage ? '[image]' : '')
+        if (shown) {
+          notifyUpdate(acpSessionId, { sessionUpdate: 'user_message_chunk', messageId: String(event.seq), content: { type: 'text', text: shown } })
+        }
       } else if (event.type === 'assistant/message') {
         for (const block of event.data.message.content as any[]) {
           if (block.type === 'text' && block.text) {
@@ -1091,7 +1174,11 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             protocolVersion: 1,
             agentCapabilities: {
               loadSession: true,
-              promptCapabilities: { image: true, audio: true, embeddedContext: true },
+              // Images are admitted through the attachment store (textual
+              // reference fallback when it is absent); embedded resources and
+              // resource links expand to text. Audio has no native DSH block,
+              // so it is honestly not advertised.
+              promptCapabilities: { image: true, audio: false, embeddedContext: true },
               sessionCapabilities: { list: {}, delete: {}, resume: {} },
             },
             agentInfo: { name: 'dsh-acp', title: 'DeepSeek Harness ACP Agent', version: '3.11.1' },
@@ -1180,7 +1267,20 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
           const rawText = (Array.isArray(params.prompt) ? params.prompt : [])
             .map((b: any) => (b && b.type === 'text' ? b.text : ''))
             .join('\n')
-          const cmdResult = await tryRunCommand(handle.agent, rawText)
+          // Admit the full prompt first so slash commands see attached images
+          // and the agent receives text AND image blocks (never a text-only
+          // projection).
+          const admitted = await acpPromptToContent(params.prompt, {
+            saveImage: attachmentsNow()
+              ? async (input) => {
+                  const svc = attachmentsNow()
+                  if (!svc) throw new Error('attachment store unavailable')
+                  return svc.saveImage(input)
+                }
+              : undefined,
+            readFile: readLocalFile,
+          })
+          const cmdResult = await tryRunCommand(handle.agent, rawText, admitted.images)
           if (cmdResult) {
             if (cmdResult.output) {
               notifyUpdate(String(params.sessionId), {
@@ -1191,16 +1291,16 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             }
             return respond({ stopReason: cmdResult.stopReason })
           }
-          const content = await buildPromptContent(params.prompt)
+          const content = admitted.content
           if (content.length === 0) return fail(-32602, 'session/prompt requires non-empty content')
-          const text = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
+          const text = content.filter((b) => b.type === 'text').map((b: any) => b.text).join('\n')
           const hasImage = content.some((b) => b.type === 'image')
           notifyUpdate(String(params.sessionId), {
             sessionUpdate: 'user_message_chunk',
             messageId: `user_${Date.now()}`,
             content: { type: 'text', text: text || (hasImage ? '[image]' : '') },
           })
-          return respond(await runPrompt(handle, String(params.sessionId), text))
+          return respond(await runPrompt(handle, String(params.sessionId), content))
         }
         case 'session/cancel': {
           const handle = handles.get(params.sessionId)
@@ -1268,10 +1368,22 @@ export async function apply(ctx: Context, config: GatewayConfig = {}): Promise<v
             const cfg = sessionConfigs.get(acpSessionId) || {}
             sessionConfigs.set(acpSessionId, { ...cfg, providerId: String(value), modelId: undefined })
           } else if (configId === 'thought_level') {
-            const allowed = ['minimal', 'low', 'medium', 'high', 'max']
-            if (!allowed.includes(String(value))) return fail(-32602, `unknown thought level: ${String(value)}`)
+            const valueStr = String(value)
+            // The current model route's adapter-declared efforts; without a
+            // catalog fall back to the built-in effort vocabulary.
+            const route = await currentRoute(acpSessionId)
+            const effortOptions = await reasoningEffortOptionsFor(route.provider, route.model)
+            const allowed = new Set<string>([PROVIDER_DEFAULT_REASONING_EFFORT])
+            for (const o of effortOptions) allowed.add(o.value)
+            if (effortOptions.length === 0) {
+              for (const v of ['minimal', 'low', 'medium', 'high', 'max']) allowed.add(v)
+            }
+            if (!allowed.has(valueStr)) return fail(-32602, `unknown thought level: ${valueStr}`)
             const cfg = sessionConfigs.get(acpSessionId) || {}
-            sessionConfigs.set(acpSessionId, { ...cfg, reasoningEffort: String(value) })
+            sessionConfigs.set(acpSessionId, {
+              ...cfg,
+              reasoningEffort: valueStr === PROVIDER_DEFAULT_REASONING_EFFORT ? undefined : valueStr,
+            })
           } else if (configId === 'permission') {
             const allowed = ['read-only', 'workspace-write', 'danger-full-access']
             if (!allowed.includes(String(value))) return fail(-32602, `unknown permission: ${String(value)}`)

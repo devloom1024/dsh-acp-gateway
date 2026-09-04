@@ -13,7 +13,7 @@ import type { NeverSignal, SessionModeState } from './codec.js'
  * The session's durable event log as a plain array. 0.1.2-alpha.4 removed the
  * public `Session.events` accessor in favor of `snapshotEvents()` /
  * `eventAt()` / `seq`; this helper prefers the new API and falls back to the
- * legacy accessors on pre-alpha.4 runtimes.
+ * legacy accessors on pre-alpha.4 runtimes (0.1.2-rc.1 keeps the new API).
  */
 export function sessionEvents(session: any): any[] {
   try {
@@ -82,7 +82,17 @@ export interface LlmService {
     provider: string,
     model: string,
     signal?: AbortSignal,
-  ): Promise<{ context?: { contextWindow: number } } | undefined>
+  ): Promise<
+    | {
+        context?: { contextWindow: number }
+        /** Adapter-declared reasoning efforts for this exact route (0.1.2-rc.1). */
+        reasoning?: {
+          efforts: readonly { id: string; name: string; description?: string }[]
+          defaultEffort?: string
+        }
+      }
+    | undefined
+  >
 }
 
 /** `agentDefaultModel` service surface. */
@@ -103,7 +113,8 @@ export interface CommandsService {
   execute(
     agent: DshAgent,
     line: string,
-    images: readonly never[],
+    /** Encoded raster images attached to the slash command (0.1.2-rc.1). */
+    images: readonly { mediaType: string; data: string; name?: string }[],
     signal: NeverSignal,
   ): Promise<{ commandId: string; result?: { kind?: string; text?: string; content?: any[] } } | undefined>
 }

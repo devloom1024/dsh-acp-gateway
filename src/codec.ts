@@ -3,7 +3,15 @@
  *
  * @module dsh-acp-gateway/codec
  */
+import { Buffer } from 'node:buffer'
 import type { StopReason, ToolKind, ToolCallLocation, DiffContent, ConfigOption, ConfigOptionValue } from './types.js'
+
+/**
+ * The `thought_level` value that means "leave the provider's own default in
+ * place" (no explicit reasoning effort on requests). Mirrors the official
+ * `@deepseek-ai/dsh-acp` model-control vocabulary (`""` = provider default).
+ */
+export const PROVIDER_DEFAULT_REASONING_EFFORT = ''
 
 /**
  * Map a harness turn ending to ACP's terminal stop-reason vocabulary.
@@ -75,6 +83,154 @@ export function promptHasUnsupportedContent(prompt: any[]): boolean {
       block.type !== 'image' &&
       block.type !== 'audio',
   )
+}
+
+/** Raster media types DSH attachment stores accept (aligned with dsh-acp). */
+export const RASTER_IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+/** Canonical RFC 4648 base64 (no whitespace, no URL-safe aliases). */
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+
+/** Decode one canonical base64 payload, or `undefined` when not canonical. */
+function decodeBase64(data: string): Uint8Array | undefined {
+  if (typeof data !== 'string' || data.length === 0 || !CANONICAL_BASE64.test(data)) return undefined
+  const bytes = Buffer.from(data, 'base64')
+  if (bytes.toString('base64') !== data) return undefined
+  return new Uint8Array(bytes)
+}
+
+/**
+ * One ACP prompt block already admitted from the wire (or prepared for one).
+ * @param type - DSH core content block type (`text` or `image`).
+ * @param text - text content when the block is a text block.
+ * @param attachment - durable image reference when the block is an image block.
+ */
+export interface AcpAdmittedBlock {
+  type: 'text' | 'image'
+  text?: string
+  attachment?: unknown
+}
+
+/**
+ * Injections the gateway provides while admitting one ACP prompt.
+ * @param saveImage - persist one decoded raster image through the deployment
+ *   attachment store; absent when no store is mounted (image blocks degrade to
+ *   textual references instead of failing the prompt).
+ * @param readFile - read one local `file://` (or absolute-path) reference to
+ *   text, resolving `undefined` when the file is unreadable, binary, too large,
+ *   or outside the gateway's file-read policy.
+ */
+export interface AcpPromptAdmissionDeps {
+  saveImage?(input: { data: Uint8Array; mediaType: string; name?: string }): Promise<unknown>
+  readFile?(uri: string): Promise<string | undefined>
+}
+
+/**
+ * Admit an ACP v1 prompt's blocks into core DSH content. Every block type
+ * degrades gracefully instead of being dropped:
+ * - `text` passes through verbatim;
+ * - `resource` (embedded context) expands its `text`, admits raster `data`
+ *   through the attachment store, inlines local `file://` files, and otherwise
+ *   becomes an explicit textual reference;
+ * - `resource_link` inlines local `file://` files through the injected reader
+ *   and otherwise becomes an explicit textual reference (same shape the
+ *   baseline `acpPromptToText` uses);
+ * - `image` is admitted through the attachment store (canonical base64, raster
+ *   media types only), degrading to a textual reference when the store is
+ *   absent or admission fails;
+ * - `audio` and unknown kinds become textual references so no client content
+ *   is silently dropped.
+ * @param prompt - ACP prompt blocks in wire order.
+ * @param deps - attachment-store and file-reader injections.
+ * @returns ordered core content plus the encoded raster images (for slash
+ *   commands, which accept `EncodedImageAttachment[]`).
+ */
+export async function acpPromptToContent(
+  prompt: any[],
+  deps: AcpPromptAdmissionDeps = {},
+): Promise<{ content: AcpAdmittedBlock[]; images: { mediaType: string; data: string; name?: string }[] }> {
+  const content: AcpAdmittedBlock[] = []
+  const images: { mediaType: string; data: string; name?: string }[] = []
+  const pushRef = (text: string) => content.push({ type: 'text', text })
+  const refText = (text: string, fallback: string) => (text && text.trim() ? text : fallback)
+  const isRaster = (mimeType: string | undefined): mimeType is string =>
+    typeof mimeType === 'string' && RASTER_IMAGE_MEDIA_TYPES.includes(mimeType)
+  /** Persist one decoded raster image, degrading to a reference on failure. */
+  const admitImage = async (
+    data: string,
+    mimeType: string | undefined,
+    name: string | undefined,
+    label: string,
+  ): Promise<void> => {
+    const bytes = decodeBase64(data)
+    if (bytes && deps.saveImage && isRaster(mimeType)) {
+      try {
+        const attachment = await deps.saveImage({ data: bytes, mediaType: mimeType, ...(name ? { name } : {}) })
+        images.push({ mediaType: mimeType, data, ...(name ? { name } : {}) })
+        content.push({ type: 'image', attachment })
+        return
+      } catch (e) {
+        pushRef(`[image attachment failed to load: ${String((e instanceof Error && e.message) || e)}]`)
+        return
+      }
+    }
+    pushRef(
+      `[${label} mimeType=${mimeType || 'unknown'} dataLength=${typeof data === 'string' ? data.length : 0}${name ? ` name=${JSON.stringify(name)}` : ''}]`,
+    )
+  }
+  /** Inline one local file reference through the injected reader. */
+  const admitLocalFile = async (uri: string, label: string): Promise<boolean> => {
+    if (!deps.readFile) return false
+    let text: string | undefined
+    try {
+      text = await deps.readFile(uri)
+    } catch (e) {
+      text = undefined
+    }
+    if (text === undefined) return false
+    const head = `\n[${label} ${uri}]\n`
+    content.push({ type: 'text', text: text.length > 0 ? `${head}${text}\n` : head })
+    return true
+  }
+  for (const b of Array.isArray(prompt) ? prompt : []) {
+    if (!b || typeof b !== 'object') continue
+    const type = b.type
+    if (type === 'text') {
+      content.push({ type: 'text', text: refText(b.text, '') })
+    } else if (type === 'resource') {
+      const r = b.resource && typeof b.resource === 'object' ? b.resource : {}
+      if (typeof r.text === 'string') {
+        content.push({ type: 'text', text: r.text })
+      } else if (typeof r.data === 'string') {
+        if (isRaster(r.mimeType)) {
+          await admitImage(r.data, r.mimeType, r.name || b.name || r.uri, 'image attachment')
+        } else {
+          const resName = r.name || b.name
+          pushRef(
+            `[file attachment mimeType=${r.mimeType || 'unknown'} dataLength=${r.data.length}${resName ? ` name=${JSON.stringify(resName)}` : r.uri ? ` uri=${JSON.stringify(r.uri)}` : ''}]`,
+          )
+        }
+      } else if (typeof r.uri === 'string') {
+        if (!(await admitLocalFile(r.uri, 'resource'))) pushRef(`[resource uri=${JSON.stringify(r.uri)}]`)
+      } else {
+        // Embedded resource with no readable projection: name it, do not drop it.
+        pushRef(`[resource${b.name ? ` name=${JSON.stringify(b.name)}` : ''}]`)
+      }
+    } else if (type === 'resource_link') {
+      const uri = typeof b.uri === 'string' ? b.uri : ''
+      if (!(await admitLocalFile(uri, 'resource_link'))) {
+        pushRef(`\n[resource_link name=${JSON.stringify(b.name ?? null)} uri=${JSON.stringify(uri)}]\n`)
+      }
+    } else if (type === 'image') {
+      await admitImage(b.data, b.mimeType, b.uri, 'image attachment')
+    } else if (type === 'audio') {
+      // DSH has no native audio block; pass an explicit textual reference.
+      pushRef(`[audio attachment mimeType=${b.mimeType || 'unknown'} dataLength=${typeof b.data === 'string' ? b.data.length : 0}]`)
+    } else {
+      pushRef(`[unsupported content block: ${String(type)}]`)
+    }
+  }
+  return { content, images }
 }
 
 /**
@@ -407,14 +563,14 @@ export function buildConfigOptions(input: ConfigOptionsInput): ConfigOption[] {
       options: modelOptions.length > 0 ? modelOptions : [],
     })
   }
-  if (reasoningEffort) {
+  if (reasoningEffort || effortOptions.length > 0) {
     options.push({
       id: 'thought_level',
       name: 'Thought Level',
       description: 'Reasoning effort for this session',
       category: 'thought_level',
       type: 'select',
-      currentValue: reasoningEffort,
+      currentValue: reasoningEffort ?? PROVIDER_DEFAULT_REASONING_EFFORT,
       options:
         effortOptions.length > 0
           ? effortOptions

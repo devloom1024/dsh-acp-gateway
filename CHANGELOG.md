@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.12.0] - 2026-09-04
+
+### Changed
+- Reference the DeepSeek Harness 0.1.2-rc.1 runtime
+  (`@deepseek-ai/dsh` / `@deepseek-ai/dsh-app-boot` /
+  `@deepseek-ai/dsh-tools` `^0.1.2-rc.1`). Verified against the published
+  package surface: `commands.execute` now takes `readonly
+  EncodedImageAttachment[]` (encoded raster images attached to a slash
+  command), `llm.resolveModelInfo()` exposes the route's adapter-declared
+  reasoning efforts (`reasoning.efforts` + `reasoning.defaultEffort`), and the
+  `attachments` store validates image batches against the deployment's
+  `imageLimits.mediaTypes` (png/jpeg/webp/gif). Session event reads, branded
+  `ReasoningEffortId`, and preset mounting are unchanged from alpha.4.
+
+### Fixed
+- Image and file prompt content are no longer dropped. `session/prompt`
+  previously threw away every admitted image (the prompt was reduced to its
+  text before `agent.followup`), so a vision model never saw attached
+  pictures; `resource_link` blocks and binary/data-bearing `resource` blocks
+  were silently discarded. Prompt admission now runs through
+  `acpPromptToContent()` (`src/codec.ts`): raster images persist through the
+  attachment store as real `image` blocks (canonical base64, the deployment's
+  media-type vocabulary), `resource_link`/`resource` file references inline
+  local `file://` files as text (unreadable, binary, or oversized files keep
+  an explicit textual reference), audio and unknown kinds degrade to explicit
+  references, and slash commands receive the prompt's encoded images
+  (0.1.2-rc.1 `commands.execute`). Nothing the client sends is silently
+  dropped anymore.
+- The `thought_level` session config option is now always offered once the
+  session route exposes reasoning efforts, instead of only after an effort was
+  already chosen — the option was missing at `session/new` on most
+  deployments. Its select vocabulary and the current value now come from the
+  model adapter's declared efforts (`llm.resolveModelInfo().reasoning`,
+  exactly the official model-control vocabulary): the adapter's effort list,
+  plus a "Provider default" entry (empty value) when the adapter configures
+  no default. `session/set_config_option thought_level` validates against
+  that catalog (falling back to the built-in vocabulary when no catalog is
+  reachable), and the empty provider-default value clears the session's
+  explicit effort instead of being rejected.
+- `initialize` no longer advertises `audio` prompt capability (DSH has no
+  native audio block; audio inputs were already degraded to textual
+  references, so claiming the capability was misleading).
+- History replay renders archived user `image` blocks as `[image]` instead of
+  omitting the message.
+
 ## [3.11.1] - 2026-09-02
 
 ### Fixed

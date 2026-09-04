@@ -13,7 +13,7 @@ sessions, and settings as the Web GUI.
 > | Field | Value |
 > |---|---|
 > | Name | `dsh-acp-gateway` |
-> | Version | 3.11.1 |
+> | Version | 3.12.0 |
 > | Transport | stdio (JSON-RPC 2.0, newline-delimited) |
 > | Protocol | ACP v1 |
 > | Command | `npx -y dsh-acp-gateway` |
@@ -60,7 +60,7 @@ It is a standard ACP registry JSON with an `npx` distribution:
 {
   "distribution": {
     "npx": {
-      "package": "dsh-acp-gateway@3.11.1"
+      "package": "dsh-acp-gateway@3.12.0"
     }
   }
 }
@@ -80,11 +80,11 @@ versions in sync.
 | ✅ Full tool access | mounts the selected agent preset: bash, fs, web, skills, subagents, ... |
 | ✅ `session/list` / `session/load` / `session/delete` | resume persisted sessions with history replay |
 | ✅ `usage_update` | token usage from `assistant/message` |
-| ✅ Image / audio prompt content | image → DSH attachment; audio → textual reference |
+| ✅ Image / file / audio prompt content | raster images → real DSH image attachments (vision models see them); attached files (`resource` text/data, `resource_link` file://) inline into the prompt; audio → textual reference |
 | ✅ Slash commands | `available_commands_update` + `/cmd` execution (incl. `/plan`, `/plan off` — the same channel the web GUI's Plan chip uses) |
 | ✅ Session modes | the **agent presets** (the web GUI's modes: Standard / PTC / Minimal / Creator / your custom presets), `session/set_mode` re-composes the agent, `current_mode_update` |
 | ✅ `user_message_chunk` | echo accepted prompts |
-| ✅ Embedded resource content | `resource` blocks expand into prompt text |
+| ✅ Embedded resource content | `resource` blocks expand into prompt text; local `file://` `resource_link` files inline their text |
 | ✅ Session config options | ACP v1 `configOptions` (select) for `mode` (the agent presets), `model` (`provider/model`), `thought_level`, `permission` (read-only / workspace-write / danger-full-access) |
 | ✅ Permission approval flow | workspace-write asks the client through `session/request_permission` for mutating tools (edit/delete/move/execute) |
 | ✅ Elicitation | DSH `ask_user_question` surfaces as an ACP `elicitation/create` form; answers feed back as the tool result |
@@ -257,7 +257,7 @@ Implemented methods (Agent side): `initialize`, `authenticate` (no-op), `session
 
 Notifications: `agent_message_chunk`, `user_message_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`, `config_option_update`.
 
-Session config options: `mode` (the agent presets — standard / ptc / minimal / creation / your custom presets), `model` (`provider/model` — one selector across every provider), `thought_level` (minimal/low/medium/high/max), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). `model` and `thought_level` route through the per-agent request waterfall (like the web GUI's model selector) and take effect on the next prompt without disposing the session; `mode` recomposes a not-yet-started session immediately and re-composes a started one at the next prompt; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). `configOptions` report the session's **actual** current state — the client's pending choice, else the session's own logged request header / recorded preset / sandbox policy resolution — so a session loaded after a server restart shows the config it really runs, not the ambient default. Both `configOptions` and the `modes` field are returned (transition period per the spec).
+Session config options: `mode` (the agent presets — standard / ptc / minimal / creation / your custom presets), `model` (`provider/model` — one selector across every provider), `thought_level` (the model adapter's declared reasoning efforts, plus a "Provider default" entry — empty value — when the adapter configures no default; with no reachable catalog it falls back to the built-in off/low/high/max vocabulary), `permission` (sandbox file access: read-only / workspace-write / danger-full-access). `model` and `thought_level` route through the per-agent request waterfall (like the web GUI's model selector) and take effect on the next prompt without disposing the session; `mode` recomposes a not-yet-started session immediately and re-composes a started one at the next prompt; `permission` applies immediately and sets the approval policy (workspace-write asks the client via `session/request_permission` for mutating tools). `configOptions` report the session's **actual** current state — the client's pending choice, else the session's own logged request header / recorded preset / sandbox policy resolution — so a session loaded after a server restart shows the config it really runs, not the ambient default. Both `configOptions` and the `modes` field are returned (transition period per the spec).
 
 Notifications additionally include `agent_thought_chunk` (reasoning stream), `plan` (from `exit_plan_mode`), and `session_info_update` (title changes). Titles are stable by design: DSH first logs a deterministic fallback title (a truncation of the first message) and supersedes it with the LLM/provider title seconds later — the gateway suppresses the fallback and notifies only user-pinned and provider titles, deduped per session, so the client sees one title that stays fixed (a genuinely changing title still updates). `session/load` / `session/resume` re-surface the session's current title once (for clients that connect after it was set), and `session/list` folds the latest logged title per session. DSH `ask_user_question` maps to an ACP `elicitation/create` form.
 
